@@ -100,11 +100,20 @@ impl Container {
     /// 新增 DB
     /// 返回 新DB的索引位
     pub fn add_db(&self, db_name: String, mem_bytes: u64) -> usize {
+        let name = db_name.clone();
+        debug!("prepare add db {}", db_name);
         let mut wl = self.db.write().unwrap();
+        debug!("lock to add db {}", &db_name);
         let mut w_db = &mut *wl;
-        w_db.insert(db_name, Db::new(mem_bytes));
+        debug!("get lock to add db {}", &db_name);
+
+        w_db.insert(name, Db::new(mem_bytes));
+        debug!("success add db {}", db_name);
+        let db_len = w_db.len();
+        drop(wl);
         self.re_balance_db_mem();
-        w_db.len() - 1
+        debug!("re balance after add db {}", db_name);
+        db_len - 1
     }
 
     pub fn clear_db(&self, db_name: &str) {

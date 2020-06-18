@@ -41,8 +41,8 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
             ))
         })
         .level(log::LevelFilter::Warn)
-        .chain(std::io::stdout())
-        .chain(fern::log_file("output.log")?)
+        // .chain(std::io::stdout())
+        .chain(fern::log_file("link.log")?)
         .apply()?;
     Ok(())
 }
@@ -50,6 +50,7 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
 lazy_static! {
 
     static ref CTX: Container = {
+        setup_logger();
         let mut ctx = Container::new();
         ctx
     };
@@ -106,7 +107,6 @@ pub extern "system" fn Java_ext_Cache_newDb(env: JNIEnv,
             .unwrap_or(db_name_str).into_inner();
     }
 
-    setup_logger();
     if let Ok(db_name) = env.get_string(db_name_str) {
         let nm: String = db_name.into();
         CTX.add_db(nm.clone(), max_bytes as u64);
