@@ -1,0 +1,35 @@
+[package]
+name = "link"
+version = "0.1.0"
+authors = ["darrenfu <tiger_kin@163.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["cdylib"]
+
+#[lib]
+#name = "link"
+#path = "src/lib.rs"
+
+[[bin]]
+name = "mybin"
+path = "src/bin/main.rs"
+
+
+[dependencies]
+jni = "0.16.0"
+log = { version = "0.4" }
+#tokio = { version = "0.2", features = ["rt-core","time"] }
+#简单的日志 https://github.com/daboross/fern
+fern = "0.6.0"
+crossbeam = "0.7"
+chrono = "0.4"
+lazy_static = "1.4"
+dashmap = "3.11"
+rand = "0.7"
+bytes = "0.5"
+num_cpus = "1.13"
+#https://crates.io/crates/sysinfo
+sysinfo = "<=0.14.1"
+
