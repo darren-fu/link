@@ -251,9 +251,9 @@ impl Db {
         let get_result = self.map.get_with_action(k.as_str(), |k_ref, v_ref| {
             match v_ref {
                 Some(v) => {
-                    // if !v.is_expire() {
-                    //     v.last_access_at.store(now(), Ordering::Relaxed);
-                    // }
+                    if !v.is_expire() {
+                        v.last_access_at.store(now(), Ordering::Relaxed);
+                    }
 
                     GetResult::VALUE((*v).clone())
                 }
