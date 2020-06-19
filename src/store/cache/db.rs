@@ -15,6 +15,7 @@ use sysinfo::{System, SystemExt};
 use crate::store::ConcurrentHashMap;
 use crate::store::map::hashmap::GetResult;
 use std::cell::RefCell;
+use log::Level::Info;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
 const HIGH_LEVEL_FACTORY: f64 = 0.85;
@@ -23,7 +24,7 @@ const DEFAULT_DB_SIZE: u64 = 10_0000;
 const DEFAULT_LRU_SAMPLES: i32 = 5;
 const DEFAULT_DB_BYTES: u64 = 15 * 1024 * 1024;
 
-
+#[derive(Debug, Clone, Copy)]
 pub enum MemState {
     Normal,
     Warn,
@@ -36,8 +37,9 @@ pub enum MemState {
 pub struct Container {
     db: Arc<RwLock<HashMap<String, Db>>>,
     free_mem: Arc<AtomicU64>,
-    min_free_mem: AtomicU64,
+    min_free_mem: Arc<AtomicU64>,
     max_usable_mem: AtomicU64,
+    mem_stat: Arc<AtomicCell<MemState>>,
 }
 
 
@@ -49,18 +51,36 @@ impl Container {
         let d_c = db.clone();
         let free_mem_c = free_mem.clone();
         let sys_c = sys.clone();
+
+        let min_free_mem = Arc::new(AtomicU64::new(1024 * 1024 * 1024));
+        let min_free_mem_c = min_free_mem.clone();
+
+        let stat = Arc::new(AtomicCell::new(MemState::Normal));
+        let stat_c = stat.clone();
+
         // Start the background task.
         std::thread::spawn(move || {
             loop {
                 do_auto_evict(d_c.clone());
                 free_mem_c.store(sys_c.get_free_memory(), Ordering::Relaxed);
+                let min_free_mem_bytes = min_free_mem_c.load(Ordering::Relaxed);
+                if sys_c.get_free_memory() <= min_free_mem_bytes {
+                    stat_c.store(MemState::Critical);
+                } else { stat_c.store(MemState::Normal); }
+
                 std::thread::sleep(Duration::from_secs(1))
             }
         });
-        Container { db, free_mem, min_free_mem: AtomicU64::new(1024 * 1024 * 1024), max_usable_mem: AtomicU64::new(u64::max_value()) }
+        Container {
+            db,
+            free_mem,
+            min_free_mem,
+            max_usable_mem: AtomicU64::new(u64::max_value()),
+            mem_stat: stat,
+        }
     }
 
-    pub fn with_free_mem(&self, min_free_mem: u64) {
+    pub fn with_min_free_mem(&self, min_free_mem: u64) {
         self.min_free_mem.store(min_free_mem, Ordering::Relaxed);
     }
     pub fn with_max_usable_mem(&self, max_usable_mem: u64) {
@@ -82,6 +102,7 @@ impl Container {
             let m = &db.max_bytes.load(Ordering::Relaxed);
             total_max = total_max + *m as f64;
         }
+        let max = self.max_usable_mem.load(Ordering::Relaxed);
 
         let div = (self.max_usable_mem.load(Ordering::Relaxed) as f64).div(total_max);
 
@@ -92,6 +113,7 @@ impl Container {
                 let m = &db.max_bytes.load(Ordering::Relaxed);
                 let new_size = div.mul(*m as f64) as u64;
                 &db.with_mem_size(new_size);
+                info!("{}重置内存大小:{}", db_name, new_size);
             }
         }
     }
@@ -125,7 +147,7 @@ impl Container {
         }
     }
     pub fn cur_mem_stat(&self) -> MemState {
-        MemState::Normal
+        self.mem_stat.load()
     }
 
     pub fn get_db(&self, db_name: &str) -> Option<Db> {
@@ -208,6 +230,15 @@ impl Db {
     }
 
     pub fn insert(&self, k: String, data: Bytes, ttl_millis: Option<u64>, mem_stat: MemState) -> bool {
+        match mem_stat {
+            MemState::Critical => {
+                warn!("拒绝insert，当前内存状态Critical");
+                return false;
+            }
+            _ => {}
+        }
+
+
         let entry = Entry::from_ttl_millis(data, ttl_millis);
         let new_size = entry.size_of();
         let key_len = k.len() as u64;
@@ -835,6 +866,10 @@ fn test_instant_add() {
     println!("ex-->{:?}", expire_at);
 }
 
+#[test]
+fn test_111() {
+    println!("u64::max_value()-->{}", u64::max_value());
+}
 
 #[test]
 fn test_compare_insert_db_and_map() {

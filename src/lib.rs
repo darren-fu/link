@@ -58,7 +58,7 @@ lazy_static! {
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_containerMaxUseMemSize(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_containerMaxUseMemSize(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
@@ -74,23 +74,23 @@ pub extern "system" fn Java_ext_Cache_containerMaxUseMemSize(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_containerMinFreeMemSize(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_containerMinFreeMemSize(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
                                                               class: JClass,
-                                                              max_bytes: jlong)
+                                                              min_free_bytes: jlong)
                                                               -> jstring {
-    if max_bytes as i64 <= 0 {
+    if min_free_bytes as i64 <= 0 {
         return env.new_string("ERROR_SIZE_ARG").unwrap().into_inner();
     }
-    CTX.with_max_usable_mem(max_bytes as u64);
+    CTX.with_min_free_mem(min_free_bytes as u64);
     return env.new_string("OK").unwrap().into_inner();
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_newDb(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_newDb(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
@@ -125,7 +125,7 @@ pub extern "system" fn Java_ext_Cache_newDb(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_updateDb(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_updateDb(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
@@ -163,7 +163,7 @@ pub extern "system" fn Java_ext_Cache_updateDb(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_put(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_put(env: JNIEnv,
                                           class: JClass,
                                           db_name_str: JString,
                                           key_str: JString,
@@ -192,7 +192,7 @@ pub extern "system" fn Java_ext_Cache_put(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_get(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_get(env: JNIEnv,
                                           class: JClass,
                                           db_name_str: JString,
                                           key_str: JString)
@@ -216,7 +216,7 @@ pub extern "system" fn Java_ext_Cache_get(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_del(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_del(env: JNIEnv,
                                           class: JClass,
                                           db_name_str: JString,
                                           key_str: JString)
@@ -236,7 +236,7 @@ pub extern "system" fn Java_ext_Cache_del(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_changeMemSize(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_changeMemSize(env: JNIEnv,
                                                     class: JClass,
                                                     db_name_str: JString,
                                                     max_bytes: jlong)
@@ -256,7 +256,7 @@ pub extern "system" fn Java_ext_Cache_changeMemSize(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_clearDb(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_clearDb(env: JNIEnv,
                                               class: JClass,
                                               db_name_str: JString)
                                               -> jstring {
@@ -270,7 +270,7 @@ pub extern "system" fn Java_ext_Cache_clearDb(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_dbCapacity(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_dbCapacity(env: JNIEnv,
                                                  class: JClass,
                                                  db_name_str: JString)
                                                  -> jlong {
@@ -286,7 +286,7 @@ pub extern "system" fn Java_ext_Cache_dbCapacity(env: JNIEnv,
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_ext_Cache_dbMemSize(env: JNIEnv,
+pub extern "system" fn Java_ext_HostCache_dbMemSize(env: JNIEnv,
                                                 class: JClass,
                                                 db_name_str: JString)
                                                 -> jlong {
