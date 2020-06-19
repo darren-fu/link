@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use log::Level::Info;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
-const HIGH_LEVEL_FACTORY: f64 = 0.85;
+const HIGH_LEVEL_FACTORY: f64 = 0.95;
 
 const DEFAULT_DB_SIZE: u64 = 10_0000;
 const DEFAULT_LRU_SAMPLES: i32 = 5;
