@@ -62,9 +62,9 @@ pub extern "system" fn Java_ext_HostCache_containerMaxUseMemSize(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
-                                                             class: JClass,
-                                                             max_bytes: jlong)
-                                                             -> jstring {
+                                                                 class: JClass,
+                                                                 max_bytes: jlong)
+                                                                 -> jstring {
     if max_bytes as i64 <= 0 {
         return env.new_string("ERROR_SIZE_ARG").unwrap().into_inner();
     }
@@ -78,9 +78,9 @@ pub extern "system" fn Java_ext_HostCache_containerMinFreeMemSize(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
-                                                              class: JClass,
-                                                              min_free_bytes: jlong)
-                                                              -> jstring {
+                                                                  class: JClass,
+                                                                  min_free_bytes: jlong)
+                                                                  -> jstring {
     if min_free_bytes as i64 <= 0 {
         return env.new_string("ERROR_SIZE_ARG").unwrap().into_inner();
     }
@@ -94,11 +94,11 @@ pub extern "system" fn Java_ext_HostCache_newDb(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
-                                            class: JClass,
-                                            db_name_str: JString,
-                                            max_capacity: jlong,
-                                            max_bytes: jlong)
-                                            -> jstring {
+                                                class: JClass,
+                                                db_name_str: JString,
+                                                max_capacity: jlong,
+                                                max_bytes: jlong)
+                                                -> jstring {
     // let r_name = env.get_string(input);
 
 
@@ -129,11 +129,11 @@ pub extern "system" fn Java_ext_HostCache_updateDb(env: JNIEnv,
 // This is the class that owns our static method. It's not going to be used,
 // but still must be present to match the expected signature of a static
 // native method.
-                                               class: JClass,
-                                               db_name_str: JString,
-                                               max_capacity: jlong,
-                                               max_bytes: jlong)
-                                               -> jstring {
+                                                   class: JClass,
+                                                   db_name_str: JString,
+                                                   max_capacity: jlong,
+                                                   max_bytes: jlong)
+                                                   -> jstring {
     // let r_name = env.get_string(input);
     let capacity = max_capacity as i64;
     let mem = max_bytes as i64;
@@ -164,12 +164,12 @@ pub extern "system" fn Java_ext_HostCache_updateDb(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_put(env: JNIEnv,
-                                          class: JClass,
-                                          db_name_str: JString,
-                                          key_str: JString,
-                                          data_byte: jbyteArray,
-                                          ttl_milliseconds: jlong)
-                                          -> jstring {
+                                              class: JClass,
+                                              db_name_str: JString,
+                                              key_str: JString,
+                                              data_byte: jbyteArray,
+                                              ttl_milliseconds: jlong)
+                                              -> jstring {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_ref()) {
@@ -193,10 +193,10 @@ pub extern "system" fn Java_ext_HostCache_put(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_get(env: JNIEnv,
-                                          class: JClass,
-                                          db_name_str: JString,
-                                          key_str: JString)
-                                          -> jbyteArray {
+                                              class: JClass,
+                                              db_name_str: JString,
+                                              key_str: JString)
+                                              -> jbyteArray {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Ok(key) = env.get_string(key_str) {
@@ -217,10 +217,10 @@ pub extern "system" fn Java_ext_HostCache_get(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_del(env: JNIEnv,
-                                          class: JClass,
-                                          db_name_str: JString,
-                                          key_str: JString)
-                                          -> jstring {
+                                              class: JClass,
+                                              db_name_str: JString,
+                                              key_str: JString)
+                                              -> jstring {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_ref()) {
@@ -237,10 +237,10 @@ pub extern "system" fn Java_ext_HostCache_del(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_changeMemSize(env: JNIEnv,
-                                                    class: JClass,
-                                                    db_name_str: JString,
-                                                    max_bytes: jlong)
-                                                    -> jstring {
+                                                        class: JClass,
+                                                        db_name_str: JString,
+                                                        max_bytes: jlong)
+                                                        -> jstring {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_ref()) {
@@ -257,9 +257,9 @@ pub extern "system" fn Java_ext_HostCache_changeMemSize(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_clearDb(env: JNIEnv,
-                                              class: JClass,
-                                              db_name_str: JString)
-                                              -> jstring {
+                                                  class: JClass,
+                                                  db_name_str: JString)
+                                                  -> jstring {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         CTX.clear_db(dd.as_ref());
@@ -271,9 +271,9 @@ pub extern "system" fn Java_ext_HostCache_clearDb(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_dbCapacity(env: JNIEnv,
-                                                 class: JClass,
-                                                 db_name_str: JString)
-                                                 -> jlong {
+                                                     class: JClass,
+                                                     db_name_str: JString)
+                                                     -> jlong {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_str()) {
@@ -287,9 +287,9 @@ pub extern "system" fn Java_ext_HostCache_dbCapacity(env: JNIEnv,
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_ext_HostCache_dbMemSize(env: JNIEnv,
-                                                class: JClass,
-                                                db_name_str: JString)
-                                                -> jlong {
+                                                    class: JClass,
+                                                    db_name_str: JString)
+                                                    -> jlong {
     if let Ok(db_name) = env.get_string(db_name_str) {
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_str()) {

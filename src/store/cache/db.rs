@@ -66,9 +66,10 @@ impl Container {
         std::thread::spawn(move || {
             loop {
                 do_auto_evict(d_c.clone());
-                free_mem_c.store(sys_c.get_free_memory(), Ordering::Relaxed);
+                let sys_free_meme_bytes = sys_c.get_free_memory() * 1024;
+                free_mem_c.store(sys_free_meme_bytes, Ordering::Relaxed);
                 let min_free_mem_bytes = min_free_mem_c.load(Ordering::Relaxed);
-                if sys_c.get_free_memory() <= min_free_mem_bytes {
+                if sys_free_meme_bytes <= min_free_mem_bytes {
                     stat_c.store(MemState::Critical);
                 } else { stat_c.store(MemState::Normal); }
 
@@ -93,9 +94,6 @@ impl Container {
     }
 
     pub fn re_balance_db_mem(&self) {
-        let aaa = self.max_usable_mem.load(Ordering::Relaxed);
-        warn!("re_balance_db_mem:{},self.db.is_poisoned():{}", aaa, self.db.is_poisoned());
-
         if self.max_usable_mem.load(Ordering::Relaxed) == u64::max_value() {
             return;
         }
@@ -109,11 +107,8 @@ impl Container {
             let m = &db.origin_max_bytes.load(Ordering::Relaxed);
             total_max = total_max + *m as f64;
         }
-        warn!("sum-->{}", total_max);
-        let max = self.max_usable_mem.load(Ordering::Relaxed);
 
         let div = (self.max_usable_mem.load(Ordering::Relaxed) as f64).div(total_max);
-        warn!("重置内存大小:max:{},total:{},div:{}", max, total_max, div);
 
         //container定义的中内存大小小于所有DB定义的内存总和
         //重新计算DB max mem size
@@ -122,7 +117,7 @@ impl Container {
                 let m = &db.origin_max_bytes.load(Ordering::Relaxed);
                 let new_size = div.mul(*m as f64) as u64;
                 &db.with_mem_size(new_size);
-                warn!("重置内存大小:{}", new_size);
+                warn!("{}重置内存大小:{}", db_name, new_size);
             }
         }
     }
@@ -198,7 +193,7 @@ pub struct Db {
 }
 
 fn lru_default_dead_line() -> u64 {
-    now() - 3 * 1000
+    now() - 15 * 1000
 }
 
 impl Db {
