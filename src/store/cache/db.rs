@@ -15,10 +15,9 @@ use sysinfo::{System, SystemExt};
 use crate::store::ConcurrentHashMap;
 use crate::store::map::hashmap::GetResult;
 use std::cell::RefCell;
-use log::Level::Info;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
-const HIGH_LEVEL_FACTORY: f64 = 0.95;
+const HIGH_LEVEL_FACTORY: f64 = 0.85;
 
 const DEFAULT_DB_SIZE: u64 = 10_0000;
 const DEFAULT_LRU_SAMPLES: i32 = 5;
@@ -35,10 +34,15 @@ pub enum MemState {
 ///Db容器，可存在多个Db，使用不通String作为Db的标识区分
 #[derive(Debug)]
 pub struct Container {
+    //数据容器
     db: Arc<RwLock<HashMap<String, Db>>>,
+    //系统当前空闲内存
     free_mem: Arc<AtomicU64>,
+    //允许最小空闲内存
     min_free_mem: Arc<AtomicU64>,
+    //允许使用最大内存
     max_usable_mem: AtomicU64,
+    //内存容量状态
     mem_stat: Arc<AtomicCell<MemState>>,
 }
 
@@ -89,6 +93,9 @@ impl Container {
     }
 
     pub fn re_balance_db_mem(&self) {
+        let aaa = self.max_usable_mem.load(Ordering::Relaxed);
+        warn!("re_balance_db_mem:{},self.db.is_poisoned():{}", aaa, self.db.is_poisoned());
+
         if self.max_usable_mem.load(Ordering::Relaxed) == u64::max_value() {
             return;
         }
@@ -99,21 +106,23 @@ impl Container {
         let map = &*rlg;
         let mut total_max: f64 = 1 as f64;
         for (db_name, db) in map.iter() {
-            let m = &db.max_bytes.load(Ordering::Relaxed);
+            let m = &db.origin_max_bytes.load(Ordering::Relaxed);
             total_max = total_max + *m as f64;
         }
+        warn!("sum-->{}", total_max);
         let max = self.max_usable_mem.load(Ordering::Relaxed);
 
         let div = (self.max_usable_mem.load(Ordering::Relaxed) as f64).div(total_max);
+        warn!("重置内存大小:max:{},total:{},div:{}", max, total_max, div);
 
         //container定义的中内存大小小于所有DB定义的内存总和
         //重新计算DB max mem size
         if div < 1.0 && div > 0.0 {
             for (db_name, db) in map.iter() {
-                let m = &db.max_bytes.load(Ordering::Relaxed);
+                let m = &db.origin_max_bytes.load(Ordering::Relaxed);
                 let new_size = div.mul(*m as f64) as u64;
                 &db.with_mem_size(new_size);
-                info!("{}重置内存大小:{}", db_name, new_size);
+                warn!("重置内存大小:{}", new_size);
             }
         }
     }
@@ -179,7 +188,10 @@ pub fn do_auto_evict(db_vec: Arc<RwLock<HashMap<String, Db>>>) {
 #[derive(Debug, Clone)]
 pub struct Db {
     max_capacity: Arc<AtomicU64>,
+    // 经过re balance后的最大容量
     max_bytes: Arc<AtomicU64>,
+    // 设置的最大容量
+    origin_max_bytes: Arc<AtomicU64>,
     map: Arc<ConcurrentHashMap<String, Entry>>,
     cur_bytes: Arc<AtomicU64>,
     cur_evict_idx: Arc<AtomicU64>,
@@ -206,6 +218,7 @@ impl Db {
         Db {
             max_capacity: Arc::new(AtomicU64::new(u64::max_value())),
             max_bytes: Arc::new(AtomicU64::new(bytes)),
+            origin_max_bytes: Arc::new(AtomicU64::new(bytes)),
             map,
             cur_bytes,
             cur_evict_idx,
@@ -218,6 +231,7 @@ impl Db {
     pub fn with_mem_size(&self, max_bytes: u64) {
         if max_bytes > DEFAULT_DB_BYTES {
             self.max_bytes.store(max_bytes, Ordering::Relaxed);
+            self.origin_max_bytes.store(max_bytes, Ordering::Relaxed);
         }
     }
 
