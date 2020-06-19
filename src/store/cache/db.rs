@@ -17,7 +17,7 @@ use crate::store::map::hashmap::GetResult;
 use std::cell::RefCell;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
-const HIGH_LEVEL_FACTORY: f64 = 0.85;
+const HIGH_LEVEL_FACTORY: f64 = 0.95;
 
 const DEFAULT_DB_SIZE: u64 = 10_0000;
 const DEFAULT_LRU_SAMPLES: i32 = 5;
@@ -116,7 +116,7 @@ impl Container {
             for (db_name, db) in map.iter() {
                 let m = &db.origin_max_bytes.load(Ordering::Relaxed);
                 let new_size = div.mul(*m as f64) as u64;
-                &db.with_mem_size(new_size);
+                &db.change_max_mem_size(new_size);
                 warn!("{}重置内存大小:{}", db_name, new_size);
             }
         }
@@ -223,10 +223,26 @@ impl Db {
         self.max_capacity.store(max_capacity, Ordering::Relaxed);
     }
 
+    ///设置最大内存
+    pub fn change_max_mem_size(&self, max_bytes: u64) {
+        if max_bytes > DEFAULT_DB_BYTES {
+            self.max_bytes.store(max_bytes, Ordering::Relaxed);
+        } else {
+            self.max_bytes.store(DEFAULT_DB_BYTES, Ordering::Relaxed);
+        }
+        let max = self.max_bytes.load(Ordering::Relaxed);
+        warn!("实际重置内存大小:{}", max);
+    }
+
+    /// 重新设置允许的最大内存
+    ///变更 origin_max_bytes
     pub fn with_mem_size(&self, max_bytes: u64) {
         if max_bytes > DEFAULT_DB_BYTES {
             self.max_bytes.store(max_bytes, Ordering::Relaxed);
             self.origin_max_bytes.store(max_bytes, Ordering::Relaxed);
+        } else {
+            self.max_bytes.store(DEFAULT_DB_BYTES, Ordering::Relaxed);
+            self.origin_max_bytes.store(DEFAULT_DB_BYTES, Ordering::Relaxed);
         }
     }
 
