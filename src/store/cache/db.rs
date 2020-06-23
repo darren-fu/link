@@ -116,8 +116,8 @@ impl Container {
             for (db_name, db) in map.iter() {
                 let m = &db.origin_max_bytes.load(Ordering::Relaxed);
                 let new_size = div.mul(*m as f64) as u64;
-                &db.change_max_mem_size(new_size);
                 warn!("{}重置内存大小:{}", db_name, new_size);
+                &db.change_max_mem_size(new_size);
             }
         }
     }
@@ -273,7 +273,7 @@ impl Db {
 
         let entry = Entry::from_ttl_millis(data, ttl_millis);
         let new_size = entry.mem_size();
-        let need_size = size_of_entry_key(&entry, &k);
+        let need_size = size_of_entry_key(&entry, &k) + 128;
 
         let dead_line = (self.max_bytes.load(Ordering::Relaxed) as f64 * 0.95) as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
@@ -282,7 +282,7 @@ impl Db {
             //  强行剔除部分数据，确保可以放下data大小
             let mut rng = thread_rng();
 
-            let start_idx = rng.gen_range(self.map.get_rehash_idx(), self.map.capacity());
+            let start_idx = rng.gen_range(0, self.map.capacity());
             let (evict_num, evict_bytes) =
                 self.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(start_idx)),
                                                        DEFAULT_LRU_SAMPLES,
@@ -587,6 +587,7 @@ impl Db {
             }
 
             if hard_vec.len() > 0 {
+                info!("强行剔除:{:?}", hard_vec);
                 for k in hard_vec.iter() {
                     if let Some(moved_node) = self.map.remove(k) {
                         if moved_node.get_val_ref().is_some() {
@@ -636,9 +637,9 @@ impl Db {
         if evict_num > 0 {}
         let end_time = Instant::now();
         let diff = end_time.duration_since(start_time).as_micros();
-        if diff > 100 {
-            info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},diff:{}checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
-                  diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), (evict_idx - start_idx.load(Ordering::Relaxed)), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
+        if diff > 300 {
+            info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
+                  diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
         }
 
         (evict_num, released_bytes)
@@ -830,6 +831,30 @@ fn test_just_insert() {
         }
     }
     println!("end---insert--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
+}
+
+#[test]
+fn test_hash_map() {
+
+    let mut data = [0u8; 1024];
+    rand::thread_rng().fill_bytes(&mut data);
+    let mut map = HashMap::<String,Bytes>::new();
+    for x in 0..500000 {
+        let vec = Vec::from(data.as_ref());
+        map.insert(x.to_string() + "aaa", Bytes::from(vec).clone());
+    }
+    println!("结束");
+    std::thread::sleep(Duration::from_secs(10));
+    println!("zaiulai ");
+
+    for x in 0..500000 {
+        let vec = Vec::from(data.as_ref());
+        map.insert(x.to_string() + "bbb", Bytes::from(vec).clone());
+        map.remove((x.to_string() + "aaa").as_str());
+    }
+    println!("sssss ");
+    std::thread::sleep(Duration::from_secs(50))
+
 }
 
 #[test]

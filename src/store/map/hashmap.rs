@@ -595,7 +595,9 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
     fn do_remove(&self, hash_code: u64, key: &K, count: u32) -> Option<Node<K, V>> {
         let target_tb = self.get_table_to_exec();
-        return self.do_remove_on_table(hash_code, key, target_tb, count);
+        let move_node = self.do_remove_on_table(hash_code, key, target_tb, count);
+        info!("删除key->{:?}", key);
+        move_node
     }
 
     fn do_remove_on_table(&self, hash_code: u64, key: &K,

@@ -4,8 +4,7 @@ use bytes::Bytes;
 // use link::store::cache::Db;
 // use chrono::Utc;
 // use link::store::cache::db::MemState;
-use rand::prelude::*;
-// use std::sync::atomic::{AtomicU32, Ordering};
+// use rand::prelude::*;
 // use std::time::Duration;
 //
 // use std::sync::Arc;
@@ -16,7 +15,7 @@ use rand::prelude::*;
 
 fn main(){
 
-
+    //
     // let db = Arc::new(Db::new(300 * 1024 * 1024));
     //
     // let mut data = [0u8; 1024];
