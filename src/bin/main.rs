@@ -1,14 +1,41 @@
 // use link::store::ConcurrentHashMap;
-// use bytes::Bytes;
+use bytes::Bytes;
 // use std::sync::Arc;
 // use link::store::cache::Db;
 // use chrono::Utc;
 // use link::store::cache::db::MemState;
-// use rand::prelude::*;
+use rand::prelude::*;
 // use std::sync::atomic::{AtomicU32, Ordering};
 // use std::time::Duration;
+//
+// use std::sync::Arc;
+// use link::store::cache::Db;
+// use chrono::Utc;
+// use link::store::cache::db::MemState;
+// use std::sync::atomic::Ordering;
 
-fn main(){}
+fn main(){
+
+
+    // let db = Arc::new(Db::new(300 * 1024 * 1024));
+    //
+    // let mut data = [0u8; 1024];
+    // rand::thread_rng().fill_bytes(&mut data);
+    // // let num = 1024 * 1024 * 1;
+    // let num = u32::max_value();
+    // let start = Utc::now();
+    // println!("start---insert--->");
+    // for x in 0..num {
+    //     let vec = Vec::from(data.as_ref());
+    //     db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(100000), MemState::Normal);
+    //     // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
+    //     if x % 5_0000 == 0 {
+    //         println!("xxxxxxxxxx->{}", db.mem_size() / 1024 / 1024);
+    //     }
+    // }
+    // println!("end---insert--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
+
+}
 
 // fn main_1() {
 //     // 400ms完成并发插入300万条数据  单线程1秒接近80万

@@ -19,7 +19,7 @@ use crate::store::map::node::{MapEntry, Node};
 use crate::store::map::node::MapEntry::{BinNode, EmptyNode, MovedNode};
 
 ///
-const DEFAULT_LOAD_FACTOR: f64 = 6.72;
+const DEFAULT_LOAD_FACTOR: f64 = 5.0;
 const DEFAULT_CAPACITY: u64 = 2;
 const MAXIMUM_CAPACITY: u64 = 1 << 30;
 const MAX_ARRAY_SIZE: u32 = u32::max_value();
@@ -131,6 +131,10 @@ pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: 
 }
 
 impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHashMap<K, V, BuildHasherDefault<DefaultHasher>> {
+    pub fn get_rehash_idx(&self) -> u64 {
+        self.rehash_idx.load(Ordering::Relaxed).clone()
+    }
+
     pub fn get_entry_keys(&self, idx: u64) -> Option<Vec<K>> {
         let tab = self.get_table_to_exec();
         let tab_on_idx = tab.get(idx as usize);
@@ -144,19 +148,56 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
 
 
-    pub fn append_entry_keys<F>(&self, idx: u64, check: F, key_vec: &mut Vec<K>)
+    pub fn append_entry_keys<F>(&self, idx: u64, mut check: F, key_vec: &mut Vec<K>)
         where F: FnMut(&K, Option<&V>) -> bool, {
         let tab = self.get_table_to_exec();
+        let f_ref = &mut check;
+        let append_result = self.append_entry_keys_on_tab(idx, tab, 0, f_ref, key_vec);
+
+        match append_result {
+            Ok(_) => {}
+            Err(msg) => {
+                if "Moved".eq(msg.as_str()) {
+                    println!("节点迁移,idx->{},len->{}", idx, key_vec.len());
+
+                    let append_result = self.append_entry_keys_on_tab(idx, self.get_table_to_exec_unless(Some(tab)), 1, f_ref, key_vec);
+                    println!("节点迁移,idx->{},len->{}", idx + self.capacity(), key_vec.len());
+                    let append_result = self.append_entry_keys_on_tab(idx + self.capacity(), self.get_table_to_exec_unless(Some(tab)), 1, f_ref, key_vec);
+                }
+            }
+        }
+    }
+
+    fn append_entry_keys_on_tab<F>(&self, idx: u64, target_tab: &Vec<RwLock<MapEntry<K, V>>>,
+                                   count: u8, check: &mut F, key_vec: &mut Vec<K>) -> Result<(), String>
+        where F: FnMut(&K, Option<&V>) -> bool, {
+        let tab = target_tab;
         let tab_on_idx = tab.get(idx as usize);
-        if let Some(entry) = tab_on_idx {
-            if entry.is_poisoned() {
+        if let Some(entry_lock) = tab_on_idx {
+            if entry_lock.is_poisoned() {
                 warn!("出现了POISON")
             }
-            let rlr = entry.read();
+            let rlr = entry_lock.read();
             let rl = rlr.unwrap();
-            let aa = &*rl;
-            aa.append_keys_to_vec(check, key_vec);
+            let entry = &*rl;
+
+            match entry {
+                BinNode(bin) => {
+                    entry.append_keys_to_vec(check, key_vec);
+                }
+                EmptyNode => {
+                    //debug!("Node无数据");
+                }
+                MovedNode => {
+                    drop(entry_lock);
+                    return Err("Moved".to_owned());
+                }
+            }
+            debug!("检索数据idx:{}", idx);
+        } else {
+            debug!("没有数据on idx:{}", idx);
         }
+        Ok(())
     }
 
     pub fn filter_entry_keys<F>(&self, idx: u64, check: F, key_vec: &mut Vec<K>)
@@ -380,10 +421,11 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         let hash_code = make_hash(&self.hasher, &key);
         //当前使用哪个table就insert到哪个table
         let pre = self.do_insert(hash_code, key, val, 0);
-        //debug!("insert完成:,size-->{}", self.size.load(Ordering::Relaxed));
         if pre.is_none() {
             self.size.fetch_add(1, Ordering::Relaxed);
         }
+        debug!("insert完成:,size-->{}", self.size.load(Ordering::Relaxed));
+
         self.try_to_resize();
         pre
     }
@@ -649,7 +691,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                 let last_resizing_timestamp = self.last_resizing_time.load(Ordering::Relaxed);
 
                 if last_resizing_timestamp > 0 && now - last_resizing_timestamp < 2 {
-                    // //warn!("扩容间隔太短");
+                    debug!("扩容间隔太短");
                     return;
                 }
 
@@ -660,15 +702,17 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                 let pre_status = self.status.compare_and_swap(normal, prepare_resizing);
 
                 if pre_status.ne(&normal) {
-                    //debug!("status错误，不能扩容->{:?}", self.status.load());
+                    debug!("status错误，不能扩容->{:?}", self.status.load());
                     return;
                 }
-                let new_capacity = self.compute_new_capacity(self.size.load(Ordering::Relaxed) as u64);
+                // 调整为按照数组长度扩容两倍，而不是当前size
+                // let new_capacity = self.compute_new_capacity(self.size.load(Ordering::Relaxed) as u64);
+                let new_capacity = self.compute_new_capacity(cur_capacity);
                 if state.use_next_table {
-                    //debug!("扩容cur_table--->{}", new_capacity);
+                    debug!("扩容cur_table--->{}", new_capacity);
                     self.resize_table(&self.table, new_capacity);
                 } else {
-                    //debug!("扩容next_table--->{}", new_capacity);
+                    debug!("扩容next_table--->{}", new_capacity);
                     self.resize_table(&self.next_table, new_capacity);
                 }
 
@@ -681,7 +725,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                     //info!("status-------错误，不能扩容->{:?}", self.status.load());
                     return;
                 }
-                //warn!("开始扩容,capacity---->{} -> {}", cur_capacity, new_capacity);
+                debug!("开始扩容,capacity---->{} -> {}", cur_capacity, new_capacity);
 
                 // self.last_resizing_time.compare_and_swap(last_resizing_timestamp, now, Ordering::Relaxed);
                 self.progressive_rehash(0);
@@ -719,7 +763,10 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             if shift > 31 {
                 return tmp;
             }
-            if tmp > old_size && ((old_size as f64) / (tmp as f64) < self.load_factor) {
+            // if tmp > old_size && ((old_size as f64) / (tmp as f64) < self.load_factor) {
+            //     return tmp;
+            // }
+            if tmp > old_size {
                 return tmp;
             }
             shift = shift + 1;
@@ -746,7 +793,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                 if pre_status.eq(&old) {
                     let now = Utc::now().timestamp_millis() as u64;
                     self.last_resizing_time.store(now, Ordering::Relaxed);
-                    //warn!("成功结束扩容--> size:{:?},status:{:?}", self.size, self.status.load());
+                    debug!("成功结束扩容--> size:{:?},status:{:?}", self.size, self.status.load());
                 }
             }
             _ => {}
@@ -840,7 +887,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             //warn!("target不存在的index_2, out of bound:{}", idx + source.capacity());
             return;
         }
-        //info!("扩容索引--->:{}", idx);
+        debug!("扩容索引--->:{}", idx);
 
         //获取源地址写锁
         let source_entry = source.get(idx).unwrap();
@@ -937,25 +984,39 @@ mod tests {
 //         //debug!("my_vector-->{:?}", my_vector);
 //     }
 //
-//     #[test]
-//     fn test_insert_first() {
-//         setup_logger();
-//
-//         let map1: ConcurrentHashMap<&str, i32> = ConcurrentHashMap::new();
-//         let arc_map = Arc::new(map1);
-//         let mut arc_map_1 = arc_map.clone();
-//         let arc_map_2 = arc_map.clone();
-//
-//         arc_map_1.insert("AAAA", 11111);
-// // arc_map_1.insert("BBBB", 22222);
-// // arc_map_2.insert("CCCC", 33333);
-// // arc_map_1.resize();
-// // arc_map_1.progressive_rehash(0);
-//
-//         //debug!("map -> {:?}", arc_map_2);
-//     }
-//
-//     #[test]
+    #[test]
+    fn test_insert_first() {
+        setup_logger();
+
+        let map1: ConcurrentHashMap<&str, i32> = ConcurrentHashMap::new();
+
+        let arc_map = Arc::new(map1);
+        let mut arc_map_1 = arc_map.clone();
+        let arc_map_2 = arc_map.clone();
+
+        arc_map_1.insert("AAAA", 11111);
+        arc_map_1.insert("BBBB", 22222);
+        let mut vec: Vec<&str> = Vec::new();
+        arc_map_1.append_entry_keys(0, |k_ref, v_ref| {
+            match v_ref {
+                Some(v) => {
+                    println!("找到数据:{},map->{:?}", v, arc_map_1);
+                    true
+                }
+                _ => false
+            }
+        }, &mut vec);
+        arc_map_2.insert("CCCC", 33333);
+
+        println!("vec--->{:?}", vec);
+
+        arc_map_2.insert("CCCC2", 33333);
+        arc_map_2.insert("CCCC3", 33333);
+
+        println!("map -> {:?}", arc_map_2);
+    }
+
+    //     #[test]
 //     fn test_insert_and_get() {
 //         setup_logger();
 //
@@ -1119,7 +1180,7 @@ mod tests {
             let cc = counter.clone();
             let tx1 = mpsc::Sender::clone(&tx);
 
-            let t = thread::spawn(move|| {
+            let t = thread::spawn(move || {
                 //info!("t{} start", idx);
                 let start = Utc::now();
 

@@ -99,8 +99,9 @@ impl<K: Eq + Hash + Debug + Clone, V: Debug + Clone> MapEntry<K, V> {
                         }
                     }
                 };
-            }
-            _ => ()
+            },
+            // MovedNode => { warn!("节点被迁移"); },
+            _ => {}
         }
     }
 }
@@ -276,7 +277,7 @@ impl<K: Eq + Hash + Debug + Clone, V: Debug + Clone> MapEntry<K, V> {
                 loop {
                     debug!("remove_key n--->{:?}", cur_node);
 
-                    if cur_node.next.is_none(){
+                    if cur_node.next.is_none() {
                         return None;
                     }
 

@@ -192,9 +192,16 @@ pub struct Db {
     cur_evict_idx: Arc<AtomicU64>,
 }
 
-fn lru_default_dead_line() -> u64 {
-    now() - 15 * 1000
+fn lru_default_dead_line() -> Instant {
+    // now() - 15 * 1000
+    Instant::now().checked_sub(Duration::from_secs(15)).unwrap()
 }
+
+
+fn size_of_entry_key(entry: &Entry, key_ref: &String) -> u64 {
+    entry.mem_size() + (key_ref.len() as u64) + 64
+}
+
 
 impl Db {
     pub fn new(max_bytes: u64) -> Self {
@@ -254,6 +261,7 @@ impl Db {
         self.map.size()
     }
 
+
     pub fn insert(&self, k: String, data: Bytes, ttl_millis: Option<u64>, mem_stat: MemState) -> bool {
         match mem_stat {
             MemState::Critical => {
@@ -263,21 +271,24 @@ impl Db {
             _ => {}
         }
 
-
         let entry = Entry::from_ttl_millis(data, ttl_millis);
-        let new_size = entry.size_of();
-        let key_len = k.len() as u64;
-        let need_size = new_size + key_len + 64;
+        let new_size = entry.mem_size();
+        let need_size = size_of_entry_key(&entry, &k);
 
         let dead_line = (self.max_bytes.load(Ordering::Relaxed) as f64 * 0.95) as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_bytes > dead_line {
-            debug!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
+            info!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
             //  强行剔除部分数据，确保可以放下data大小
             let mut rng = thread_rng();
-            let start_idx = rng.gen_range(0, self.map.capacity());
-            let (evict_num, evict_bytes) = self.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(start_idx)),
-                                                                                  DEFAULT_LRU_SAMPLES, need_size, now());
+
+            let start_idx = rng.gen_range(self.map.get_rehash_idx(), self.map.capacity());
+            let (evict_num, evict_bytes) =
+                self.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(start_idx)),
+                                                       DEFAULT_LRU_SAMPLES,
+                                                       need_size,
+                                                       Instant::now()
+                                                       , false);
             if evict_bytes < need_size {
                 return false;
             }
@@ -288,7 +299,7 @@ impl Db {
         let insert = self.map.insert(k, entry);
         match insert {
             Some(pre) => {
-                let pre_size = pre.size_of();
+                let pre_size = pre.mem_size();
                 if new_size > pre_size {
                     self.cur_bytes.fetch_add(new_size.sub(pre_size), Ordering::Relaxed);
                 } else if new_size < pre_size {
@@ -306,7 +317,7 @@ impl Db {
     pub fn remove(&self, k: String) {
         if let Some(node) = self.map.remove(&k) {
             if let Some(entry) = node.get_val() {
-                let size_desc = k.len() as u64 + entry.size_of() + 64;
+                let size_desc = k.len() as u64 + entry.mem_size() + 64;
                 self.cur_bytes.fetch_sub(size_desc, Ordering::Relaxed);
             }
         }
@@ -317,7 +328,7 @@ impl Db {
             match v_ref {
                 Some(v) => {
                     if !v.is_expire() {
-                        v.last_access_at.store(now(), Ordering::Relaxed);
+                        v.last_access_at.store(Instant::now());
                     }
 
                     GetResult::VALUE((*v).clone())
@@ -387,7 +398,8 @@ impl Db {
             loop {
                 let (evict_num, evict_bytes) = self.do_evict_with_sample_lru_from_idx(self.cur_evict_idx.clone(),
                                                                                       DEFAULT_LRU_SAMPLES, 0,
-                                                                                      lru_default_dead_line());
+                                                                                      lru_default_dead_line(),
+                                                                                      true);
                 release_keys = release_keys + evict_num;
                 release_bytes = release_bytes + evict_bytes;
                 if Instant::now().duration_since(start).ge(&one_millis) {
@@ -458,7 +470,8 @@ impl Db {
                 Some(v) => {
                     let is_expire = v.is_expire();
                     if is_expire {
-                        released_bytes = released_bytes + v.size_of() + k_ref.len() as u64 + 64;
+                        ;
+                        released_bytes = released_bytes + size_of_entry_key(v, k_ref);
                     }
                     is_expire
                 }
@@ -485,72 +498,127 @@ impl Db {
     pub fn do_evict_with_sample_lru_from_idx(&self, start_idx: Arc<AtomicU64>,
                                              samples: i32,
                                              need_release_bytes: u64,
-                                             dead_line_access_time: u64) -> (u64, u64) {
+                                             compare_access_time: Instant,
+                                             use_lru: bool) -> (u64, u64) {
         let mut evict_num = 0;
 
-
+        let dead_line_access_time = compare_access_time.clone();
         let mut checked_num = 0;
         let mut checked_num_steps = 0;
         let mut released_bytes: u64 = 0;
-        let mut oldest_access_time = dead_line_access_time;
+        let mut oldest_access_time = compare_access_time;
+
+
+        let start_time = Instant::now();
+        let mut r_remove = 0;
+        let mut n_remove = 0;
+        let mut loop_count = 0;
+        let mut use_less_loop = 0;
+        let mut use_ful_loop = 0;
+        let mut append_loop = 0;
+        let mut aaa = 0;
+
+        let mut evict_idx = start_idx.load(Ordering::Relaxed);
+        let mut hard_vec: Vec<String> = Vec::new();
+
         loop {
             let mut oldest_access_key: Option<String> = None;
             let mut vec: Vec<String> = Vec::new();
-            let mut evict_idx = start_idx.load(Ordering::Relaxed);
+            // evict_idx = start_idx.load(Ordering::Relaxed);
 
             if evict_idx > self.map.capacity() {
-                start_idx.store(0, Ordering::Relaxed);
+                // start_idx.store(0, Ordering::Relaxed);
                 evict_idx = 0;
             }
             //已经找了一圈了，停止
             if checked_num > self.map.capacity() {
                 break;
             }
-            info!("开始查找evict_idx,->{}, mapsize->{}", evict_idx, self.map.size());
+            // warn!("开始查找evict_idx,->{}, mapsize->{}", evict_idx, self.map.size());
 
             self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
                 match v_ref {
                     Some(v) => {
-                        debug!("k-->{}, last_access_at->{},oldest_access_time->{}", k_ref, v.last_access_at.load(Ordering::Relaxed), oldest_access_time);
+                        if v.is_expire() {
+                            return true;
+                        }
+                        debug!("检索k-->{}, last_access_at->{:?},oldest_access_time->{:?}", k_ref, v.last_access_at.load(), oldest_access_time);
                         checked_num = checked_num + 1;
                         checked_num_steps = checked_num_steps + 1;
-                        if v.last_access_at.load(Ordering::Relaxed) <= oldest_access_time {
-                            oldest_access_time = v.last_access_at.load(Ordering::Relaxed).clone();
-                            oldest_access_key = Some(k_ref.to_owned());
-                            debug!("不常用的key -> {:?}, {:?}", oldest_access_key, oldest_access_time);
+
+                        let last_access = v.last_access_at.load();
+
+                        if use_lru {
+                            if last_access.le(&oldest_access_time) {
+                                oldest_access_time = last_access;
+                                oldest_access_key = Some(k_ref.to_owned());
+                                debug!("不常用的key -> {:?}, {:?}", oldest_access_key, oldest_access_time);
+                            }
+                        } else {
+                            if last_access.le(&dead_line_access_time) {
+                                hard_vec.push(k_ref.to_owned());
+                            }
                         }
-                        v.is_expire()
+
+                        false
                     }
-                    _ => false
+                    _ => {
+                        false
+                    }
                 }
             }, &mut vec);
-            start_idx.fetch_add(1, Ordering::Relaxed);
+            // start_idx.fetch_add(1, Ordering::Relaxed);
+
+            // warn!("开始查找evict_idx,->{}, start_idx->{:?},mapsize->{}", evict_idx, start_idx, self.map.size());
+
             for k in vec.iter() {
                 if let Some(moved_node) = self.map.remove(k) {
                     if moved_node.get_val_ref().is_some() {
-                        released_bytes = released_bytes + moved_node.get_val_ref().unwrap().size_of() + k.len() as u64 + 64;
+                        released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
                     } else {
                         released_bytes = released_bytes + k.len() as u64 + 64;
                     }
+                    drop(moved_node);
                     evict_num = evict_num + 1;
                 }
             }
+            if released_bytes >= need_release_bytes {
+                break;
+            }
 
-            if oldest_access_key.is_some() {
+            if hard_vec.len() > 0 {
+                for k in hard_vec.iter() {
+                    if let Some(moved_node) = self.map.remove(k) {
+                        if moved_node.get_val_ref().is_some() {
+                            released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
+                        } else {
+                            released_bytes = released_bytes + k.len() as u64 + 64;
+                        }
+                        drop(moved_node);
+                        evict_num = evict_num + 1;
+                    }
+                    if released_bytes >= need_release_bytes {
+                        break;
+                    }
+                }
+            }
+
+            if oldest_access_key.is_some() && checked_num_steps >= samples {
                 let k = oldest_access_key.unwrap();
                 info!("找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
                       &k, checked_num, need_release_bytes, released_bytes, evict_idx);
 
                 if let Some(moved_node) = self.map.remove(&k) {
                     if moved_node.get_val_ref().is_some() {
-                        released_bytes = released_bytes + moved_node.get_val_ref().unwrap().size_of() + k.len() as u64 + 64;
+                        released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
                     } else {
                         released_bytes = released_bytes + k.len() as u64 + 64;
                     }
+                    drop(moved_node);
                     evict_num = evict_num + 1;
                 }
             }
-            if checked_num as i32 >= samples && released_bytes >= need_release_bytes {
+            if released_bytes >= need_release_bytes {
                 break;
             }
             if checked_num_steps >= samples {
@@ -558,12 +626,20 @@ impl Db {
                 //重置对比的时间戳，避免使用了前面咋找到的key对应的时间戳，导致后期无法找到可删除的数据
                 oldest_access_time = dead_line_access_time;
             }
+            evict_idx = evict_idx + 1;
+            loop_count = loop_count + 1;
         }
 
         if released_bytes > 0 {
             self.cur_bytes.fetch_sub(released_bytes, Ordering::Relaxed);
         }
         if evict_num > 0 {}
+        let end_time = Instant::now();
+        let diff = end_time.duration_since(start_time).as_micros();
+        if diff > 100 {
+            info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},diff:{}checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
+                  diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), (evict_idx - start_idx.load(Ordering::Relaxed)), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
+        }
 
         (evict_num, released_bytes)
     }
@@ -584,34 +660,44 @@ struct Entry {
     /// database.
     expires_at: Option<Instant>,
 
-    last_access_at: Arc<AtomicU64>,
+    last_access_at: Arc<AtomicCell<Instant>>,
 
-    access_count: Arc<AtomicU64>,
+    size: usize,
+
 }
 
 
 impl Entry {
+    fn compute_mem_size(&mut self) {
+        let mut size = self.data.len();
+        if self.expires_at.is_some() {
+            size = size + 8;
+        }
+        size = size + 128;
+        self.size = size;
+    }
     pub fn new(data: Bytes, expires_at: Option<Instant>) -> Self {
-        let access_count = Arc::new(AtomicU64::new(0));
         let now = now();
-        Entry { data, expires_at, access_count, last_access_at: Arc::new(AtomicU64::new(now)) }
+        let mut entry = Entry { data, expires_at, size: 0, last_access_at: Arc::new(AtomicCell::new(Instant::now())) };
+        entry.compute_mem_size();
+        entry
     }
 
     pub fn from_ttl_millis(data: Bytes, ttl_millis: Option<u64>) -> Self {
-        let access_count = Arc::new(AtomicU64::new(0));
-
         let now = now();
-
-        return match ttl_millis {
+        let mut size = 0;
+        let mut entry = match ttl_millis {
             None =>
-                Entry { data, expires_at: None, access_count, last_access_at: Arc::new(AtomicU64::new(now)) }
+                Entry { data, expires_at: None, size, last_access_at: Arc::new(AtomicCell::new(Instant::now())) }
             ,
             Some(ttl) => {
                 let now_instant = Instant::now();
                 let expire_at = now_instant.checked_add(Duration::from_millis(ttl));
-                Entry { data, expires_at: expire_at, access_count, last_access_at: Arc::new(AtomicU64::new(now)) }
+                Entry { data, expires_at: expire_at, size, last_access_at: Arc::new(AtomicCell::new(now_instant)) }
             }
         };
+        entry.compute_mem_size();
+        entry
     }
 
     pub fn update_last_access_at(&self) {
@@ -628,12 +714,10 @@ impl Entry {
 
     pub fn is_used_recently(&self) -> bool { false }
 
-    pub fn size_of(&self) -> u64 {
-        let size: u64 = self.data.len() as u64 + 64;
-        if self.expires_at.is_some() {
-            return size + 16;
-        }
-        size
+
+    pub fn mem_size(&self) -> u64 {
+        self.size as u64
+        // 256
     }
 }
 
@@ -688,14 +772,14 @@ fn test_evict_lru() {
 
 
     std::thread::sleep(Duration::from_secs(1));
-    let old_key = db.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(0)), 100, 0, now());
+    let old_key = db.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(0)), 100, 0, Instant::now(), true);
     trace!("old_key-->{:?}", old_key);
 
 
     let v = db.get("bbb".to_string());
     trace!("v is {:?}", v);
 
-    let old_key = db.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(0)), 100, 0, now());
+    let old_key = db.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(0)), 100, 0, Instant::now(), true);
     trace!("old_key-->{:?}", old_key);
 }
 
@@ -728,17 +812,22 @@ fn test_size_control_of_db() {
 fn test_just_insert() {
     setup_logger();
 
-    let db = Arc::new(Db::new(500 * 1024 * 1024));
+    let db = Arc::new(Db::new(300 * 1024 * 1024));
 
     let mut data = [0u8; 1024];
     rand::thread_rng().fill_bytes(&mut data);
     // let num = 1024 * 1024 * 1;
-    let num = 100_0000;
+    let num = u32::max_value();
     let start = Utc::now();
     println!("start---insert--->");
     for x in 0..num {
         let vec = Vec::from(data.as_ref());
-        db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
+        db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(100000), MemState::Normal);
+        // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
+        if x % 5_0000 == 0 {
+            println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.cur_bytes.load(Ordering::Relaxed) / 1024 / 1024,
+                     db.map.size(), db.map.mem_size());
+        }
     }
     println!("end---insert--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
 }
@@ -921,6 +1010,35 @@ fn test_compare_insert_db_and_map() {
     println!("end---insert--->{}", Utc::now().timestamp_millis() - start1.timestamp_millis());
 }
 
+#[test]
+fn test_entry_size() {
+    let data = Bytes::from("JIBIUGFBEUIBFiewbnfihueiwnflewjilgfherwghnregoirengrioeghbiuoprehiugvrhebiughreigvbhriel");
+
+    let start = Instant::now();
+    for x in 0..10000_0000 {
+        let size: u64 = data.len() as u64 + 64;
+    }
+    let end = Instant::now();
+    println!("cost--> {} ms", end.duration_since(start).as_millis());
+
+
+    let start1 = Instant::now();
+    for x in 0..10000_0000 {
+        let size: u64 = data.len() as u64 + 128;
+    }
+    let end1 = Instant::now();
+    println!("cost--> {} ms", end1.duration_since(start1).as_millis());
+}
+
+#[test]
+fn test_mem_size_instant() {
+    let now = Instant::now();
+    let mem_size = std::mem::size_of_val(&now);
+    println!("mem_size->{}", mem_size);
+    println!("mem_size->{}", std::mem::size_of::<Entry2>());
+    println!("mem_size->{}", std::mem::size_of::<String>());
+}
+
 pub fn setup_logger() -> Result<(), fern::InitError> {
     fern::Dispatch::new()
         .format(|out, message, record| {
@@ -938,4 +1056,20 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
         // .chain(fern::log_file("output.log")?)
         .apply()?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct Entry2 {
+    /// Stored data
+    data: Bytes,
+
+    /// Instant at which the entry expires and should be removed from the
+    /// database.
+    expires_at: Option<Instant>,
+
+    last_access_at: AtomicU64,
+    last_access_at2: AtomicU64,
+
+    size: usize,
+    content: String,
 }
