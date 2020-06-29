@@ -273,12 +273,12 @@ impl Db {
 
         let entry = Entry::from_ttl_millis(data, ttl_millis);
         let new_size = entry.mem_size();
-        let need_size = size_of_entry_key(&entry, &k) + 128;
+        let need_size = size_of_entry_key(&entry, &k);
 
         let dead_line = (self.max_bytes.load(Ordering::Relaxed) as f64 * 0.95) as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_bytes > dead_line {
-            info!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
+            debug!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
             //  强行剔除部分数据，确保可以放下data大小
             let mut rng = thread_rng();
 
@@ -286,9 +286,11 @@ impl Db {
             let (evict_num, evict_bytes) =
                 self.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(start_idx)),
                                                        DEFAULT_LRU_SAMPLES,
-                                                       need_size,
-                                                       Instant::now()
-                                                       , false);
+                                                       need_size + 128,
+                                                       Instant::now(),
+                                                       false);
+            let cur = self.cur_bytes.load(Ordering::Relaxed);
+            debug!("强行剔除:{},{},pre :{},cur:{},diff:{}", evict_num, evict_bytes, cur_bytes, cur, (cur_bytes - cur));
             if evict_bytes < need_size {
                 return false;
             }
@@ -470,7 +472,6 @@ impl Db {
                 Some(v) => {
                     let is_expire = v.is_expire();
                     if is_expire {
-                        ;
                         released_bytes = released_bytes + size_of_entry_key(v, k_ref);
                     }
                     is_expire
@@ -603,7 +604,9 @@ impl Db {
                     }
                 }
             }
-
+            if released_bytes >= need_release_bytes {
+                break;
+            }
             if oldest_access_key.is_some() && checked_num_steps >= samples {
                 let k = oldest_access_key.unwrap();
                 info!("找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
@@ -827,7 +830,7 @@ fn test_just_insert() {
         // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
         if x % 5_0000 == 0 {
             println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.cur_bytes.load(Ordering::Relaxed) / 1024 / 1024,
-                     db.map.size(), db.map.mem_size());
+                     db.map.size(), (db.map.mem_size() as f64) / 1024 as f64 / 1024 as f64);
         }
     }
     println!("end---insert--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
@@ -835,10 +838,9 @@ fn test_just_insert() {
 
 #[test]
 fn test_hash_map() {
-
     let mut data = [0u8; 1024];
     rand::thread_rng().fill_bytes(&mut data);
-    let mut map = HashMap::<String,Bytes>::new();
+    let mut map = HashMap::<String, Bytes>::new();
     for x in 0..500000 {
         let vec = Vec::from(data.as_ref());
         map.insert(x.to_string() + "aaa", Bytes::from(vec).clone());
@@ -854,7 +856,6 @@ fn test_hash_map() {
     }
     println!("sssss ");
     std::thread::sleep(Duration::from_secs(50))
-
 }
 
 #[test]
