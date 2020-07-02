@@ -24,11 +24,12 @@ use lazy_static::lazy_static;
 use store::cache::Container;
 use store::cache::Db;
 use store::ConcurrentHashMap;
+use std::str::FromStr;
 
 pub mod store;
 
 
-pub fn setup_logger() -> Result<(), fern::InitError> {
+pub fn setup_logger(log_level: log::LevelFilter) -> Result<(), fern::InitError> {
     fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
@@ -40,7 +41,7 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
                 message
             ))
         })
-        .level(log::LevelFilter::Warn)
+        .level(log_level)
         // .chain(std::io::stdout())
         .chain(fern::log_file("link.log")?)
         .apply()?;
@@ -50,10 +51,31 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
 lazy_static! {
 
     static ref CTX: Container = {
-        setup_logger();
+        setup_logger(log::LevelFilter::Warn);
         let mut ctx = Container::new();
         ctx
     };
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_ext_HostCache_logLevel(env: JNIEnv,
+// This is the class that owns our static method. It's not going to be used,
+// but still must be present to match the expected signature of a static
+// native method.
+                                                   class: JClass,
+                                                   log_level: JString)
+                                                   -> jstring {
+    if let Ok(log_level) = env.get_string(log_level) {
+        let level: String = log_level.into();
+
+        if let Ok(new_level) = log::LevelFilter::from_str(level.as_ref()) {
+            setup_logger(new_level);
+            return env.new_string("OK").unwrap().into_inner();
+        }
+    }
+
+    return env.new_string("Failed").unwrap().into_inner();
 }
 
 #[no_mangle]

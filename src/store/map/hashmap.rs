@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 use chrono::prelude::*;
 use crossbeam::atomic::AtomicCell;
+use parking_lot::RwLock as FastRwLock;
 
 use crate::setup_logger;
 use crate::store::map::node::{MapEntry, Node};
@@ -60,11 +61,11 @@ pub struct ConcurrentHashMap<K, V, S = BuildHasherDefault<DefaultHasher>> {
     load_factor: f64,
     hasher: S,
     size: AtomicU64,
-    table_resize_mutex: RwLock<bool>,
+    table_resize_mutex: FastRwLock<bool>,
     rehash_idx: AtomicU64,
     rehashed_num: AtomicU64,
-    table: Vec<RwLock<MapEntry<K, V>>>,
-    next_table: Vec<RwLock<MapEntry<K, V>>>,
+    table: Vec<FastRwLock<MapEntry<K, V>>>,
+    next_table: Vec<FastRwLock<MapEntry<K, V>>>,
 }
 
 impl<'a, K, V> ConcurrentHashMap<K, V> {}
@@ -72,10 +73,10 @@ impl<'a, K, V> ConcurrentHashMap<K, V> {}
 
 impl<K, V> Default for ConcurrentHashMap<K, V> {
     fn default() -> Self {
-        let table: Vec<RwLock<MapEntry<K, V>>> = (0..DEFAULT_CAPACITY)
-            .map(|_| RwLock::new(MapEntry::EmptyNode)).collect();
-        let next_table: Vec<RwLock<MapEntry<K, V>>> = (0..DEFAULT_CAPACITY)
-            .map(|_| RwLock::new(MapEntry::EmptyNode)).collect();
+        let table: Vec<FastRwLock<MapEntry<K, V>>> = (0..DEFAULT_CAPACITY)
+            .map(|_| FastRwLock::new(MapEntry::EmptyNode)).collect();
+        let next_table: Vec<FastRwLock<MapEntry<K, V>>> = (0..DEFAULT_CAPACITY)
+            .map(|_| FastRwLock::new(MapEntry::EmptyNode)).collect();
         // let hasher = RandomState::new();
         // let mut h = DefaultHasher::new();
         let hash_builder: BuildHasherDefault<DefaultHasher> = BuildHasherDefault::<DefaultHasher>::default();
@@ -86,7 +87,7 @@ impl<K, V> Default for ConcurrentHashMap<K, V> {
             load_factor: DEFAULT_LOAD_FACTOR,
             hasher: hash_builder,
             size: AtomicU64::new(0),
-            table_resize_mutex: RwLock::new(false),
+            table_resize_mutex: FastRwLock::new(false),
             // capacity: AtomicU64::new(DEFAULT_CAPACITY),
             // use_next_table: AtomicBool::new(false),
             rehash_idx: AtomicU64::new(0),
@@ -139,7 +140,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         let tab = self.get_table_to_exec();
         let tab_on_idx = tab.get(idx as usize);
         if let Some(entry) = tab_on_idx {
-            let rl = entry.read().unwrap();
+            let rl = entry.read();
             let aa = &*rl;
             let n = aa.keys();
             return n;
@@ -158,27 +159,26 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             Ok(_) => {}
             Err(msg) => {
                 if "Moved".eq(msg.as_str()) {
-                    println!("节点迁移,idx->{},len->{}", idx, key_vec.len());
+                    debug!("节点迁移,idx->{},len->{}", idx, key_vec.len());
 
                     let append_result = self.append_entry_keys_on_tab(idx, self.get_table_to_exec_unless(Some(tab)), 1, f_ref, key_vec);
-                    println!("节点迁移,idx->{},len->{}", idx + self.capacity(), key_vec.len());
+                    debug!("节点迁移,idx->{},len->{}", idx + self.capacity(), key_vec.len());
                     let append_result = self.append_entry_keys_on_tab(idx + self.capacity(), self.get_table_to_exec_unless(Some(tab)), 1, f_ref, key_vec);
                 }
             }
         }
     }
 
-    fn append_entry_keys_on_tab<F>(&self, idx: u64, target_tab: &Vec<RwLock<MapEntry<K, V>>>,
+    fn append_entry_keys_on_tab<F>(&self, idx: u64, target_tab: &Vec<FastRwLock<MapEntry<K, V>>>,
                                    count: u8, check: &mut F, key_vec: &mut Vec<K>) -> Result<(), String>
         where F: FnMut(&K, Option<&V>) -> bool, {
         let tab = target_tab;
         let tab_on_idx = tab.get(idx as usize);
         if let Some(entry_lock) = tab_on_idx {
-            if entry_lock.is_poisoned() {
-                warn!("出现了POISON")
-            }
-            let rlr = entry_lock.read();
-            let rl = rlr.unwrap();
+            // if entry_lock.is_poisoned() {
+            //     warn!("出现了POISON")
+            // }
+            let rl = entry_lock.read();
             let entry = &*rl;
 
             match entry {
@@ -189,7 +189,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                     //debug!("Node无数据");
                 }
                 MovedNode => {
-                    drop(entry_lock);
+                    drop(rl);
                     return Err("Moved".to_owned());
                 }
             }
@@ -205,7 +205,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         let tab = self.get_table_to_exec();
         let tab_on_idx = tab.get(idx as usize);
         if let Some(entry) = tab_on_idx {
-            let rl = entry.read().unwrap();
+            let rl = entry.read();
             let aa = &*rl;
             aa.append_keys_to_vec(check, key_vec);
         }
@@ -218,10 +218,10 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
 
     pub fn with_capacity(size: u64) -> Self {
-        let table: Vec<RwLock<MapEntry<K, V>>> = (0..size)
-            .map(|_| RwLock::new(MapEntry::EmptyNode)).collect();
-        let next_table: Vec<RwLock<MapEntry<K, V>>> = (0..size)
-            .map(|_| RwLock::new(MapEntry::EmptyNode)).collect();
+        let table: Vec<FastRwLock<MapEntry<K, V>>> = (0..size)
+            .map(|_| FastRwLock::new(MapEntry::EmptyNode)).collect();
+        let next_table: Vec<FastRwLock<MapEntry<K, V>>> = (0..size)
+            .map(|_| FastRwLock::new(MapEntry::EmptyNode)).collect();
         ConcurrentHashMap {
             table,
             next_table,
@@ -243,10 +243,10 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         self.size.load(Ordering::Relaxed)
     }
 
-    pub fn size_of_table(&self, table: &Vec<RwLock<MapEntry<K, V>>>) -> u64 {
+    pub fn size_of_table(&self, table: &Vec<FastRwLock<MapEntry<K, V>>>) -> u64 {
         let mut size = 0 as u64;
         for entry in table {
-            let read = entry.read().unwrap();
+            let read = entry.read();
             size = read.len() + size;
         }
         size
@@ -257,12 +257,12 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
 
         let mut size = 0 as usize;
         for entry in &self.table {
-            let read = entry.read().unwrap();
+            let read = entry.read();
             size = read.mem_size() + size;
         }
 
         for entry in &self.next_table {
-            let read = entry.read().unwrap();
+            let read = entry.read();
             size = read.mem_size() + size;
         }
 
@@ -317,7 +317,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
 
 
     fn get_and_attempt<F, Q: ?Sized>(&self, hash_code: u64, key: &Q,
-                                     first_tb: &Vec<RwLock<MapEntry<K, V>>>,
+                                     first_tb: &Vec<FastRwLock<MapEntry<K, V>>>,
                                      action: F) -> GetResult<V>
         where F: Fn(&K, Option<&V>) -> GetResult<V>,
               K: Borrow<Q>,
@@ -326,13 +326,13 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         let index = hash_code % (capacity as u64);
         //debug!("查询数据 key:{:?}, hash code--->{},capacity->{},index->{}", key, hash_code, capacity, index);
 
-        let entry_on_index: Option<&RwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
+        let entry_on_index: Option<&FastRwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
         if let None = entry_on_index {
             return GetResult::NotFound;
         }
         let lk = entry_on_index.unwrap();
 
-        let read_lk = lk.read().unwrap();
+        let read_lk = lk.read();
         let entry = &*read_lk;
         match entry {
             BinNode(bin) => {
@@ -369,7 +369,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
 
 
     fn do_get(&self, hash_code: u64, key: &K,
-              first_tb: &Vec<RwLock<MapEntry<K, V>>>) -> Option<V> {
+              first_tb: &Vec<FastRwLock<MapEntry<K, V>>>) -> Option<V> {
         let capacity = first_tb.capacity();
         let index = hash_code % (capacity as u64);
         let mut table = "table";
@@ -379,13 +379,13 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         }
 
         //debug!("查询数据 key:{:?}, hash code--->{},table->{},capacity->{},index->{}", key, hash_code, table, capacity, index);
-        let entry_on_index: Option<&RwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
+        let entry_on_index: Option<&FastRwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
         if let None = entry_on_index {
             return None;
         }
         let lk = entry_on_index.unwrap();
 
-        let read_lk = lk.read().unwrap();
+        let read_lk = lk.read();
         let entry = &*read_lk;
         match entry {
             BinNode(bin) => {
@@ -436,7 +436,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         return self.do_insert_on_table(hash_code, key, val, target_tb, count);
     }
 
-    fn get_table_to_exec(&self) -> &Vec<RwLock<MapEntry<K, V>>> {
+    fn get_table_to_exec(&self) -> &Vec<FastRwLock<MapEntry<K, V>>> {
         match self.status.load() {
             MapStatus::Normal(state) => {
                 if state.use_next_table {
@@ -457,7 +457,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         &self.table
     }
 
-    fn get_table_to_exec_unless(&self, op_except_table: Option<&Vec<RwLock<MapEntry<K, V>>>>) -> &Vec<RwLock<MapEntry<K, V>>> {
+    fn get_table_to_exec_unless(&self, op_except_table: Option<&Vec<FastRwLock<MapEntry<K, V>>>>) -> &Vec<FastRwLock<MapEntry<K, V>>> {
         if let Some(except_tb) = op_except_table {
             if except_tb as *const _ == &self.table as *const _ {
                 return &self.next_table;
@@ -468,7 +468,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
 
     fn do_insert_node_on_table(&self, mut node: Node<K, V>,
-                               first_tb: &Vec<RwLock<MapEntry<K, V>>>, count: u32) -> Option<V> {
+                               first_tb: &Vec<FastRwLock<MapEntry<K, V>>>, count: u32) -> Option<V> {
         let k = node.release_key();
         let v = node.release_value();
         if k.is_some() && v.is_some() {
@@ -478,14 +478,14 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
 
     fn do_insert_on_table(&self, hash_code: u64, key: K, val: V,
-                          first_tb: &Vec<RwLock<MapEntry<K, V>>>, count: u32) -> Option<V> {
+                          first_tb: &Vec<FastRwLock<MapEntry<K, V>>>, count: u32) -> Option<V> {
         let capacity = first_tb.capacity();
         if capacity == 0 {
             //warn!("出现并发扩容问题，table清空")
         }
         let index = hash_code % (capacity as u64);
 
-        let entry_on_index: Option<&RwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
+        let entry_on_index: Option<&FastRwLock<MapEntry<K, V>>> = first_tb.get(index as usize);
         if let None = entry_on_index {
             // todo table清空
             //debug!("出现并发扩容问题，index->{},capacity->{},first_tb.capacity()->{},self.table.capacity() is {},self.next_table.capacity() is {}",
@@ -496,9 +496,9 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             // return None;
         }
         let lk = entry_on_index.unwrap();
-        if lk.is_poisoned() {
+        // if lk.is_poisoned() {
             //warn!("entry_on_index is_poisoned")
-        }
+        // }
 
         let mut table = "table";
 
@@ -507,15 +507,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         }
 
 
-        let lock_result = lk.write();
-        match lock_result {
-            Err(err) => {
-                return None;
-            }
-            _ => {}
-        }
-
-        let mut node_entry_lock = lock_result.unwrap();
+        let mut node_entry_lock = lk.write();
         let entry = &*node_entry_lock;
         match entry {
             BinNode(bin) => {
@@ -601,14 +593,14 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
     }
 
     fn do_remove_on_table(&self, hash_code: u64, key: &K,
-                          cur_tb: &Vec<RwLock<MapEntry<K, V>>>, count: u32) -> Option<Node<K, V>> {
+                          cur_tb: &Vec<FastRwLock<MapEntry<K, V>>>, count: u32) -> Option<Node<K, V>> {
         let capacity = cur_tb.capacity();
         if capacity == 0 {
             //warn!("出现并发缩容问题，table清空")
         }
         let index = hash_code % (capacity as u64);
 
-        let entry_on_index: Option<&RwLock<MapEntry<K, V>>> = cur_tb.get(index as usize);
+        let entry_on_index: Option<&FastRwLock<MapEntry<K, V>>> = cur_tb.get(index as usize);
         if let None = entry_on_index {
             // todo table清空
             debug!("出现并发缩容问题，index->{},capacity->{},first_tb.capacity()->{},self.table.capacity() is {},self.next_table.capacity() is {}",
@@ -618,9 +610,9 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             // return None;
         }
         let lk = entry_on_index.unwrap();
-        if lk.is_poisoned() {
-            warn!("entry_on_index is_poisoned")
-        }
+        // if lk.is_poisoned() {
+        //     warn!("entry_on_index is_poisoned")
+        // }
 
         let mut table = "table";
 
@@ -630,16 +622,8 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
 
         info!("准备删除 key:{:?},capacity->{},index->{},count-->{},table-->{}, status--->{:?}", key, capacity, index, count, table, self.status);
 
-        let lock_result = lk.write();
-        match lock_result {
-            Err(err) => {
-                warn!("lock失败:{:?}", err);
-                return None;
-            }
-            _ => {}
-        }
 
-        let mut node_entry_lock = lock_result.unwrap();
+        let mut node_entry_lock = lk.write();
 
         let mut entry = &mut *node_entry_lock;
         info!("获取写锁 key:{:?}", key);
@@ -802,23 +786,23 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         }
     }
 
-    fn resize_table(&self, table: &Vec<RwLock<MapEntry<K, V>>>, new_size: u64) {
-        let resize_table = self.table_resize_mutex.write().unwrap();
+    fn resize_table(&self, table: &Vec<FastRwLock<MapEntry<K, V>>>, new_size: u64) {
+        let resize_table = self.table_resize_mutex.write();
 
-        let tb = table as *const Vec<RwLock<MapEntry<K, V>>> as *mut Vec<RwLock<MapEntry<K, V>>>;
+        let tb = table as *const Vec<FastRwLock<MapEntry<K, V>>> as *mut Vec<FastRwLock<MapEntry<K, V>>>;
         // 风险，表被清空，次数刚插入的数据被清空 丢失！！！！，是否存在？
         //warn!("准备扩容,capacity---->{}, table.size->{} -> {}", table.capacity(), self.size_of_table(table), new_size);
         if self.size_of_table(table) > 0 {
             //warn!("转移残存数据--->");
 
             for lock in table {
-                let read = lock.read().unwrap();
+                let read = lock.read();
                 let e = read.deref();
 
                 if let MapEntry::BinNode(node) = e {
                     drop(read);
 
-                    let mut write = lock.write().unwrap();
+                    let mut write = lock.write();
 
                     let mut entry = &mut *write;
                     let mut pre_entry = entry.swap(MapEntry::MovedNode);
@@ -846,7 +830,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         unsafe {
             (*tb).clear();
             (*tb).resize_with(new_size as usize, || {
-                RwLock::new(MapEntry::EmptyNode)
+                FastRwLock::new(MapEntry::EmptyNode)
             });
             drop(resize_table);
 
@@ -867,7 +851,7 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         }
     }
 
-    fn progressive_rehash_table(&self, source: &Vec<RwLock<MapEntry<K, V>>>, target: &Vec<RwLock<MapEntry<K, V>>>, source_idx: u64) {
+    fn progressive_rehash_table(&self, source: &Vec<FastRwLock<MapEntry<K, V>>>, target: &Vec<FastRwLock<MapEntry<K, V>>>, source_idx: u64) {
         let idx = source_idx as usize;
 
         if let None = source.get(idx) {
@@ -893,19 +877,19 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
 
         //获取源地址写锁
         let source_entry = source.get(idx).unwrap();
-        if source_entry.is_poisoned() {
+        // if source_entry.is_poisoned() {
             //warn!("target_entry_lock_1 is_poisoned")
-        }
-        let lock_result = source_entry.write();
-        match lock_result {
-            Err(err) => {
-                //warn!("lock扩容失败:{}", err);
-
-                return;
-            }
-            _ => {}
-        }
-        let mut source_entry_lock: RwLockWriteGuard<MapEntry<K, V>> = lock_result.unwrap();
+        // }
+        // let lock_result = source_entry.write();
+        // match lock_result {
+        //     Err(err) => {
+        //         //warn!("lock扩容失败:{}", err);
+        //
+        //         return;
+        //     }
+        //     _ => {}
+        // }
+        let mut source_entry_lock = source_entry.write();
 
 
         let mut mut_source_entry = &mut *source_entry_lock;
@@ -988,7 +972,7 @@ mod tests {
 //
     #[test]
     fn test_insert_first() {
-        setup_logger();
+        setup_logger(log::LevelFilter::Debug);
 
         let map1: ConcurrentHashMap<&str, i32> = ConcurrentHashMap::new();
 
@@ -1161,7 +1145,7 @@ mod tests {
 //
     #[test]
     fn test_curr_insert() {
-        setup_logger();
+        setup_logger(log::LevelFilter::Debug);
 
         let c_map: ConcurrentHashMap<String, i32> = ConcurrentHashMap::with_capacity(32);
         let arc_map = Arc::new(c_map);

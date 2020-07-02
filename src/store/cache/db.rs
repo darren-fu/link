@@ -15,6 +15,7 @@ use sysinfo::{System, SystemExt};
 use crate::store::ConcurrentHashMap;
 use crate::store::map::hashmap::GetResult;
 use std::cell::RefCell;
+use parking_lot::RwLock as FastRwLock;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
 const HIGH_LEVEL_FACTORY: f64 = 0.95;
@@ -35,7 +36,7 @@ pub enum MemState {
 #[derive(Debug)]
 pub struct Container {
     //数据容器
-    db: Arc<RwLock<HashMap<String, Db>>>,
+    db: Arc<FastRwLock<HashMap<String, Db>>>,
     //系统当前空闲内存
     free_mem: Arc<AtomicU64>,
     //允许最小空闲内存
@@ -50,7 +51,7 @@ pub struct Container {
 impl Container {
     pub fn new() -> Self {
         let sys = Arc::new(System::new_all());
-        let db = Arc::new(RwLock::new(HashMap::<String, Db>::new()));
+        let db = Arc::new(FastRwLock::new(HashMap::<String, Db>::new()));
         let free_mem = Arc::new(AtomicU64::new(sys.get_free_memory()));
         let d_c = db.clone();
         let free_mem_c = free_mem.clone();
@@ -97,10 +98,10 @@ impl Container {
         if self.max_usable_mem.load(Ordering::Relaxed) == u64::max_value() {
             return;
         }
-        if self.db.is_poisoned() {
-            return;
-        }
-        let rlg = self.db.read().unwrap();
+        // if self.db.is_poisoned() {
+        //     return;
+        // }
+        let rlg = self.db.read();
         let map = &*rlg;
         let mut total_max: f64 = 1 as f64;
         for (db_name, db) in map.iter() {
@@ -128,7 +129,7 @@ impl Container {
     pub fn add_db(&self, db_name: String, mem_bytes: u64) -> usize {
         let name = db_name.clone();
         debug!("prepare add db {}", db_name);
-        let mut wl = self.db.write().unwrap();
+        let mut wl = self.db.write();
         debug!("lock to add db {}", &db_name);
         let mut w_db = &mut *wl;
         debug!("get lock to add db {}", &db_name);
@@ -145,7 +146,7 @@ impl Container {
     pub fn clear_db(&self, db_name: &str) {
         if let Some(old_db) = self.get_db(db_name) {
             let max_bytes = old_db.max_bytes.load(Ordering::Relaxed);
-            let mut wl = self.db.write().unwrap();
+            let mut wl = self.db.write();
             let mut w_db = &mut *wl;
             w_db.insert(db_name.to_owned(), Db::new(max_bytes));
         }
@@ -155,13 +156,13 @@ impl Container {
     }
 
     pub fn get_db(&self, db_name: &str) -> Option<Db> {
-        let rl = self.db.read().unwrap();
+        let rl = self.db.read();
         let map = &*rl;
         map.get(db_name).cloned()
     }
 
     pub fn get_from_db(&self, db_name: &str, k: String) -> Option<Bytes> {
-        let rl = self.db.read().unwrap();
+        let rl = self.db.read();
         let map = &*rl;
         if let Some(d) = map.get(db_name) {
             return d.get(k);
@@ -170,8 +171,8 @@ impl Container {
     }
 }
 
-pub fn do_auto_evict(db_vec: Arc<RwLock<HashMap<String, Db>>>) {
-    let rl = db_vec.read().unwrap();
+pub fn do_auto_evict(db_vec: Arc<FastRwLock<HashMap<String, Db>>>) {
+    let rl = db_vec.read();
     let r_db = &*rl;
 
     for (name, db) in r_db.iter() {
@@ -278,7 +279,7 @@ impl Db {
         let dead_line = (self.max_bytes.load(Ordering::Relaxed) as f64 * 0.95) as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_bytes > dead_line {
-            debug!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
+            info!("内存不足，准备释放,k->{},cur_bytes->{},dead_line->{}", k, cur_bytes, dead_line);
             //  强行剔除部分数据，确保可以放下data大小
             let mut rng = thread_rng();
 
@@ -290,7 +291,7 @@ impl Db {
                                                        Instant::now(),
                                                        false);
             let cur = self.cur_bytes.load(Ordering::Relaxed);
-            debug!("强行剔除:{},{},pre :{},cur:{},diff:{}", evict_num, evict_bytes, cur_bytes, cur, (cur_bytes - cur));
+            info!("强行剔除:{},{},pre :{},cur:{},diff:{}", evict_num, evict_bytes, cur_bytes, cur, (cur_bytes - cur));
             if evict_bytes < need_size {
                 return false;
             }
@@ -829,7 +830,7 @@ fn test_just_insert() {
         db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(100000), MemState::Normal);
         // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
         if x % 5_0000 == 0 {
-            println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.cur_bytes.load(Ordering::Relaxed) / 1024 / 1024,
+            println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.mem_size() / 1024 / 1024,
                      db.map.size(), (db.map.mem_size() as f64) / 1024 as f64 / 1024 as f64);
         }
     }

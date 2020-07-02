@@ -32,4 +32,6 @@ bytes = "0.5"
 num_cpus = "1.13"
 #https://crates.io/crates/sysinfo
 sysinfo = "<=0.14.1"
+parking_lot = "0.11"
+
 
