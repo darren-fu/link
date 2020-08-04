@@ -196,13 +196,12 @@ pub extern "system" fn Java_ext_HostCache_put(env: JNIEnv,
         let dd: String = db_name.into();
         if let Some(db) = CTX.get_db(dd.as_ref()) {
             let data = env.convert_byte_array(data_byte).unwrap();
-            let data_ref = data.as_ref();
             if let Ok(key) = env.get_string(key_str) {
                 let ttl = ttl_milliseconds as i64;
                 if ttl > 0 {
-                    db.insert(key.into(), Bytes::copy_from_slice(data_ref), Some(ttl as u64), CTX.cur_mem_stat());
+                    db.insert(key.into(), Bytes::from(data), Some(ttl as u64), CTX.cur_mem_stat());
                 } else {
-                    db.insert(key.into(), Bytes::copy_from_slice(data_ref), None, CTX.cur_mem_stat());
+                    db.insert(key.into(), Bytes::from(data), None, CTX.cur_mem_stat());
                 }
                 return env.new_string("OK").unwrap_or(key_str).into_inner();
             }

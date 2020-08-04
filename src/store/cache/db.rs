@@ -16,6 +16,8 @@ use crate::store::ConcurrentHashMap;
 use crate::store::map::hashmap::GetResult;
 use std::cell::RefCell;
 use parking_lot::RwLock as FastRwLock;
+use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 
 const LOW_LEVEL_FACTORY: f64 = 0.35;
 const HIGH_LEVEL_FACTORY: f64 = 0.95;
@@ -188,7 +190,7 @@ pub struct Db {
     max_bytes: Arc<AtomicU64>,
     // 设置的最大容量
     origin_max_bytes: Arc<AtomicU64>,
-    map: Arc<ConcurrentHashMap<String, Entry>>,
+    map: Arc<DashMap<String, Entry>>,
     cur_bytes: Arc<AtomicU64>,
     cur_evict_idx: Arc<AtomicU64>,
 }
@@ -211,7 +213,7 @@ impl Db {
             bytes = max_bytes
         }
 
-        let m = ConcurrentHashMap::<String, Entry>::with_capacity(2048);
+        let m = DashMap::<String, Entry>::with_capacity(2048);
 
         let map = Arc::new(m);
         let cur_bytes = Arc::new(AtomicU64::new(0));
@@ -259,7 +261,7 @@ impl Db {
     }
 
     pub fn size(&self) -> u64 {
-        self.map.size()
+        self.map.len() as u64
     }
 
 
@@ -283,7 +285,7 @@ impl Db {
             //  强行剔除部分数据，确保可以放下data大小
             let mut rng = thread_rng();
 
-            let start_idx = rng.gen_range(0, self.map.capacity());
+            let start_idx = rng.gen_range(0, self.map.capacity() as u64);
             let (evict_num, evict_bytes) =
                 self.do_evict_with_sample_lru_from_idx(Arc::new(AtomicU64::new(start_idx)),
                                                        DEFAULT_LRU_SAMPLES,
@@ -318,46 +320,61 @@ impl Db {
     }
 
     pub fn remove(&self, k: String) {
-        if let Some(node) = self.map.remove(&k) {
-            if let Some(entry) = node.get_val() {
-                let size_desc = k.len() as u64 + entry.mem_size() + 64;
-                self.cur_bytes.fetch_sub(size_desc, Ordering::Relaxed);
-            }
-        }
+        // if let Some(node) = self.map.remove(&k) {
+        //     if let Some(entry) = node.get_val() {
+        //         let size_desc = k.len() as u64 + entry.mem_size() + 64;
+        //         self.cur_bytes.fetch_sub(size_desc, Ordering::Relaxed);
+        //     }
+        // }
     }
 
     pub fn get(&self, k: String) -> Option<Bytes> {
-        let get_result = self.map.get_with_action(k.as_str(), |k_ref, v_ref| {
-            match v_ref {
-                Some(v) => {
-                    if !v.is_expire() {
-                        v.last_access_at.store(Instant::now());
-                    }
+        let get_result = self.map.get(&k);
 
-                    GetResult::VALUE((*v).clone())
-                }
-
-                _ => GetResult::NotFound
-            }
-        });
-        // 过期则删除
         return match get_result {
-            GetResult::VALUE(v) => {
-                if v.is_expire() {
+            None => None,
+            Some(re) => {
+                if re.is_expire() {
                     self.remove(k);
                     return None;
                 }
-                Some(v.data)
+                let a = &re.data;
+                let copy_data = a.slice(0..a.len());
+                Some(copy_data)
             }
-            _ => None
         };
+
+        // let get_result = self.map.get_with_action(k.as_str(), |k_ref, v_ref| {
+        //     match v_ref {
+        //         Some(v) => {
+        //             if !v.is_expire() {
+        //                 v.last_access_at.store(Instant::now());
+        //             }
+        //
+        //             GetResult::VALUE((*v).clone())
+        //         }
+        //
+        //         _ => GetResult::NotFound
+        //     }
+        // });
+        // 过期则删除
+        // return match get_result {
+        //     GetResult::VALUE(v) => {
+        //         if v.is_expire() {
+        //             self.remove(k);
+        //             return None;
+        //         }
+        //         Some(v.data)
+        //     }
+        //     _ => None
+        // };
     }
 
     /// 是否处于低容量水位
     pub fn is_low_level_capacity(&self) -> bool {
         let size_low = (self.max_capacity.load(Ordering::Relaxed) as f64 * LOW_LEVEL_FACTORY) as u64;
         let bytes_low = (self.max_bytes.load(Ordering::Relaxed) as f64 * LOW_LEVEL_FACTORY) as u64;
-        let cur_size = self.map.size();
+        let cur_size = self.map.len() as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_size < size_low && cur_bytes < bytes_low {
             return true;
@@ -369,7 +386,7 @@ impl Db {
     pub fn is_high_level_capacity(&self) -> bool {
         let size_low = (self.max_capacity.load(Ordering::Relaxed) as f64 * HIGH_LEVEL_FACTORY) as u64;
         let bytes_low = (self.max_bytes.load(Ordering::Relaxed) as f64 * HIGH_LEVEL_FACTORY) as u64;
-        let cur_size = self.map.size();
+        let cur_size = self.map.len() as u64;
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_size >= size_low || cur_bytes >= bytes_low {
             return true;
@@ -437,7 +454,7 @@ impl Db {
 
     pub fn get_cur_evict_idx(&self) -> u64 {
         let evict_idx = self.cur_evict_idx.fetch_add(1, Ordering::Relaxed);
-        let capacity = self.map.capacity();
+        let capacity = self.map.capacity() as u64;
 
         if evict_idx >= capacity {
             self.cur_evict_idx.store(1, Ordering::Relaxed);
@@ -467,19 +484,19 @@ impl Db {
         let mut released_bytes: u64 = 0;
 
         let mut vec: Vec<String> = Vec::new();
-
-        self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
-            match v_ref {
-                Some(v) => {
-                    let is_expire = v.is_expire();
-                    if is_expire {
-                        released_bytes = released_bytes + size_of_entry_key(v, k_ref);
-                    }
-                    is_expire
-                }
-                _ => false
-            }
-        }, &mut vec);
+        //
+        // self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
+        //     match v_ref {
+        //         Some(v) => {
+        //             let is_expire = v.is_expire();
+        //             if is_expire {
+        //                 released_bytes = released_bytes + size_of_entry_key(v, k_ref);
+        //             }
+        //             is_expire
+        //         }
+        //         _ => false
+        //     }
+        // }, &mut vec);
 
 
         for k in vec.iter() {
@@ -523,128 +540,128 @@ impl Db {
         let mut evict_idx = start_idx.load(Ordering::Relaxed);
         let mut hard_vec: Vec<String> = Vec::new();
 
-        loop {
-            let mut oldest_access_key: Option<String> = None;
-            let mut vec: Vec<String> = Vec::new();
-            // evict_idx = start_idx.load(Ordering::Relaxed);
+        // loop {
+        //     let mut oldest_access_key: Option<String> = None;
+        //     let mut vec: Vec<String> = Vec::new();
+        //     // evict_idx = start_idx.load(Ordering::Relaxed);
+        //
+        //     if evict_idx > self.map.capacity() as u64 {
+        //         // start_idx.store(0, Ordering::Relaxed);
+        //         evict_idx = 0;
+        //     }
+        //     //已经找了一圈了，停止
+        //     if checked_num > self.map.capacity() {
+        //         break;
+        //     }
+        // warn!("开始查找evict_idx,->{}, mapsize->{}", evict_idx, self.map.size());
 
-            if evict_idx > self.map.capacity() {
-                // start_idx.store(0, Ordering::Relaxed);
-                evict_idx = 0;
-            }
-            //已经找了一圈了，停止
-            if checked_num > self.map.capacity() {
-                break;
-            }
-            // warn!("开始查找evict_idx,->{}, mapsize->{}", evict_idx, self.map.size());
+        // self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
+        //     match v_ref {
+        //         Some(v) => {
+        //             if v.is_expire() {
+        //                 return true;
+        //             }
+        //             debug!("检索k-->{}, last_access_at->{:?},oldest_access_time->{:?}", k_ref, v.last_access_at.load(), oldest_access_time);
+        //             checked_num = checked_num + 1;
+        //             checked_num_steps = checked_num_steps + 1;
+        //
+        //             let last_access = v.last_access_at.load();
+        //
+        //             if use_lru {
+        //                 if last_access.le(&oldest_access_time) {
+        //                     oldest_access_time = last_access;
+        //                     oldest_access_key = Some(k_ref.to_owned());
+        //                     debug!("不常用的key -> {:?}, {:?}", oldest_access_key, oldest_access_time);
+        //                 }
+        //             } else {
+        //                 if last_access.le(&dead_line_access_time) {
+        //                     hard_vec.push(k_ref.to_owned());
+        //                 }
+        //             }
+        //
+        //             false
+        //         }
+        //         _ => {
+        //             false
+        //         }
+        //     }
+        // }, &mut vec);
+        // start_idx.fetch_add(1, Ordering::Relaxed);
 
-            self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
-                match v_ref {
-                    Some(v) => {
-                        if v.is_expire() {
-                            return true;
-                        }
-                        debug!("检索k-->{}, last_access_at->{:?},oldest_access_time->{:?}", k_ref, v.last_access_at.load(), oldest_access_time);
-                        checked_num = checked_num + 1;
-                        checked_num_steps = checked_num_steps + 1;
+        // warn!("开始查找evict_idx,->{}, start_idx->{:?},mapsize->{}", evict_idx, start_idx, self.map.size());
 
-                        let last_access = v.last_access_at.load();
-
-                        if use_lru {
-                            if last_access.le(&oldest_access_time) {
-                                oldest_access_time = last_access;
-                                oldest_access_key = Some(k_ref.to_owned());
-                                debug!("不常用的key -> {:?}, {:?}", oldest_access_key, oldest_access_time);
-                            }
-                        } else {
-                            if last_access.le(&dead_line_access_time) {
-                                hard_vec.push(k_ref.to_owned());
-                            }
-                        }
-
-                        false
-                    }
-                    _ => {
-                        false
-                    }
-                }
-            }, &mut vec);
-            // start_idx.fetch_add(1, Ordering::Relaxed);
-
-            // warn!("开始查找evict_idx,->{}, start_idx->{:?},mapsize->{}", evict_idx, start_idx, self.map.size());
-
-            for k in vec.iter() {
-                if let Some(moved_node) = self.map.remove(k) {
-                    if moved_node.get_val_ref().is_some() {
-                        released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
-                    } else {
-                        released_bytes = released_bytes + k.len() as u64 + 64;
-                    }
-                    drop(moved_node);
-                    evict_num = evict_num + 1;
-                }
-            }
-            if released_bytes >= need_release_bytes {
-                break;
-            }
-
-            if hard_vec.len() > 0 {
-                info!("强行剔除:{:?}", hard_vec);
-                for k in hard_vec.iter() {
-                    if let Some(moved_node) = self.map.remove(k) {
-                        if moved_node.get_val_ref().is_some() {
-                            released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
-                        } else {
-                            released_bytes = released_bytes + k.len() as u64 + 64;
-                        }
-                        drop(moved_node);
-                        evict_num = evict_num + 1;
-                    }
-                    if released_bytes >= need_release_bytes {
-                        break;
-                    }
-                }
-            }
-            if released_bytes >= need_release_bytes {
-                break;
-            }
-            if oldest_access_key.is_some() && checked_num_steps >= samples {
-                let k = oldest_access_key.unwrap();
-                info!("找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
-                      &k, checked_num, need_release_bytes, released_bytes, evict_idx);
-
-                if let Some(moved_node) = self.map.remove(&k) {
-                    if moved_node.get_val_ref().is_some() {
-                        released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
-                    } else {
-                        released_bytes = released_bytes + k.len() as u64 + 64;
-                    }
-                    drop(moved_node);
-                    evict_num = evict_num + 1;
-                }
-            }
-            if released_bytes >= need_release_bytes {
-                break;
-            }
-            if checked_num_steps >= samples {
-                checked_num_steps = 0;
-                //重置对比的时间戳，避免使用了前面咋找到的key对应的时间戳，导致后期无法找到可删除的数据
-                oldest_access_time = dead_line_access_time;
-            }
-            evict_idx = evict_idx + 1;
-            loop_count = loop_count + 1;
-        }
-
-        if released_bytes > 0 {
-            self.cur_bytes.fetch_sub(released_bytes, Ordering::Relaxed);
-        }
-        if evict_num > 0 {}
-        let end_time = Instant::now();
-        let diff = end_time.duration_since(start_time).as_micros();
-        if diff > 300 {
-            info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
-                  diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
-        }
+        // for k in vec.iter() {
+        //     if let Some(moved_node) = self.map.remove(k) {
+        //         if moved_node.get_val_ref().is_some() {
+        //             released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
+        //         } else {
+        //             released_bytes = released_bytes + k.len() as u64 + 64;
+        //         }
+        //         drop(moved_node);
+        //         evict_num = evict_num + 1;
+        //     }
+        // }
+        //     if released_bytes >= need_release_bytes {
+        //         break;
+        //     }
+        //
+        //     if hard_vec.len() > 0 {
+        //         info!("强行剔除:{:?}", hard_vec);
+        //         for k in hard_vec.iter() {
+        //             if let Some(moved_node) = self.map.remove(k) {
+        //                 if moved_node.get_val_ref().is_some() {
+        //                     released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
+        //                 } else {
+        //                     released_bytes = released_bytes + k.len() as u64 + 64;
+        //                 }
+        //                 drop(moved_node);
+        //                 evict_num = evict_num + 1;
+        //             }
+        //             if released_bytes >= need_release_bytes {
+        //                 break;
+        //             }
+        //         }
+        //     }
+        //     if released_bytes >= need_release_bytes {
+        //         break;
+        //     }
+        //     if oldest_access_key.is_some() && checked_num_steps >= samples {
+        //         let k = oldest_access_key.unwrap();
+        //         info!("找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
+        //               &k, checked_num, need_release_bytes, released_bytes, evict_idx);
+        //
+        //         if let Some(moved_node) = self.map.remove(&k) {
+        //             if moved_node.get_val_ref().is_some() {
+        //                 released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
+        //             } else {
+        //                 released_bytes = released_bytes + k.len() as u64 + 64;
+        //             }
+        //             drop(moved_node);
+        //             evict_num = evict_num + 1;
+        //         }
+        //     }
+        //     if released_bytes >= need_release_bytes {
+        //         break;
+        //     }
+        //     if checked_num_steps >= samples {
+        //         checked_num_steps = 0;
+        //         //重置对比的时间戳，避免使用了前面咋找到的key对应的时间戳，导致后期无法找到可删除的数据
+        //         oldest_access_time = dead_line_access_time;
+        //     }
+        //     evict_idx = evict_idx + 1;
+        //     loop_count = loop_count + 1;
+        // }
+        //
+        // if released_bytes > 0 {
+        //     self.cur_bytes.fetch_sub(released_bytes, Ordering::Relaxed);
+        // }
+        // if evict_num > 0 {}
+        // let end_time = Instant::now();
+        // let diff = end_time.duration_since(start_time).as_micros();
+        // if diff > 300 {
+        //     info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
+        //           diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
+        // }
 
         (evict_num, released_bytes)
     }
@@ -816,24 +833,24 @@ fn test_size_control_of_db() {
 #[test]
 fn test_just_insert() {
     setup_logger();
-
-    let db = Arc::new(Db::new(300 * 1024 * 1024));
-
-    let mut data = [0u8; 1024];
-    rand::thread_rng().fill_bytes(&mut data);
-    // let num = 1024 * 1024 * 1;
-    let num = u32::max_value();
+    //
+    // let db = Arc::new(Db::new(300 * 1024 * 1024));
+    //
+    // let mut data = [0u8; 1024];
+    // rand::thread_rng().fill_bytes(&mut data);
+    // // let num = 1024 * 1024 * 1;
+    // let num = u32::max_value();
     let start = Utc::now();
-    println!("start---insert--->");
-    for x in 0..num {
-        let vec = Vec::from(data.as_ref());
-        db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(100000), MemState::Normal);
-        // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
-        if x % 5_0000 == 0 {
-            println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.mem_size() / 1024 / 1024,
-                     db.map.size(), (db.map.mem_size() as f64) / 1024 as f64 / 1024 as f64);
-        }
-    }
+    // println!("start---insert--->");
+    // for x in 0..num {
+    //     let vec = Vec::from(data.as_ref());
+    //     db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(100000), MemState::Normal);
+    //     // db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
+    //     if x % 5_0000 == 0 {
+    //         println!("xxxxxxxxxx->{},map.size:{},map.mem_size:{}", db.mem_size() / 1024 / 1024,
+    //                  db.map.size(), (db.map.mem_size() as f64) / 1024 as f64 / 1024 as f64);
+    //     }
+    // }
     println!("end---insert--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
 }
 
@@ -874,15 +891,17 @@ fn test_just_get() {
         db.insert(x.to_string() + "aaa", Bytes::from(vec), None, MemState::Normal);
     }
     println!("insert end-----------");
+    std::thread::sleep(Duration::from_secs(2));
+
     for x in 0..10 {
         let d2 = db.clone();
-
         std::thread::spawn(move || {
             let start = Utc::now();
             for x1 in 0..100_0000 {
                 d2.get(x1.to_string() + "aaa");
             }
-            println!("end---get--->{}", Utc::now().timestamp_millis() - start.timestamp_millis());
+
+            println!("size:{},end---get--->{}", d2.size(), Utc::now().timestamp_millis() - start.timestamp_millis());
         });
     }
     std::thread::sleep(Duration::from_secs(15));
