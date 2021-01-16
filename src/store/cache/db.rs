@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::{Add, Deref, Sub, Div, Mul};
 use std::sync::{Arc, mpsc, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicU32};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -22,7 +22,7 @@ const HIGH_LEVEL_FACTORY: f64 = 0.95;
 
 const DEFAULT_DB_SIZE: u64 = 10_0000;
 const DEFAULT_LRU_SAMPLES: i32 = 5;
-const DEFAULT_DB_BYTES: u64 = 15 * 1024 * 1024;
+const DEFAULT_DB_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MemState {
@@ -96,6 +96,7 @@ impl Container {
 
     pub fn re_balance_db_mem(&self) {
         if self.max_usable_mem.load(Ordering::Relaxed) == u64::max_value() {
+            debug!("max container defined");
             return;
         }
         // if self.db.is_poisoned() {
@@ -108,9 +109,9 @@ impl Container {
             let m = &db.origin_max_bytes.load(Ordering::Relaxed);
             total_max = total_max + *m as f64;
         }
-
-        let div = (self.max_usable_mem.load(Ordering::Relaxed) as f64).div(total_max);
-
+        let caontainer_max_mem = self.max_usable_mem.load(Ordering::Relaxed);
+        let div = (caontainer_max_mem as f64).div(total_max);
+        debug!("允许容器使用最大内存:{} k,所有db配置最大内存:{}k", (caontainer_max_mem as u64) / 1024, (total_max as u64) / 1024);
         //container定义的中内存大小小于所有DB定义的内存总和
         //重新计算DB max mem size
         if div < 1.0 && div > 0.0 {
@@ -140,6 +141,17 @@ impl Container {
         drop(wl);
         self.re_balance_db_mem();
         debug!("re balance after add db {}", db_name);
+
+        let rl = self.db.read();
+        let r_db = &*rl;
+        for (db_name, db) in r_db.iter() {
+            let origin_mem_size = db.origin_max_bytes.load(Ordering::Relaxed);
+            info!("DB:{},cur_mem_size:{} k,原始设置的size:{} k,max_mem_size:{} k",
+                  db_name, db.mem_size(), origin_mem_size / 1024, db.max_mem_size() / 1024)
+
+
+        }
+
         db_len - 1
     }
 
@@ -176,8 +188,12 @@ pub fn do_auto_evict(db_vec: Arc<FastRwLock<HashMap<String, Db>>>) {
     let r_db = &*rl;
 
     for (name, db) in r_db.iter() {
+        let start_idx = db.get_cur_evict_idx();
         let (evict_num, evict_bytes) = db.do_evict_data();
-        debug!("本次清除{}数据:{}个,内存大小:{}", name, evict_num, evict_bytes);
+        let end_idx = db.get_cur_evict_idx();
+        let mem_level = db.mem_level();
+        info!("本次清除{}数据:{}个,check_idx:[from: {} - to: {}], mem_level:{},clear内存大小:{}k,cur_mem:{} k", name,
+              evict_num, start_idx, end_idx, mem_level, evict_bytes / 1024, db.mem_size() / 1024);
     }
 }
 
@@ -191,6 +207,7 @@ pub struct Db {
     map: Arc<ConcurrentHashMap<String, Entry>>,
     cur_bytes: Arc<AtomicU64>,
     cur_evict_idx: Arc<AtomicU64>,
+    cur_level: Arc<AtomicU32>,
 }
 
 fn lru_default_dead_line() -> Instant {
@@ -225,6 +242,8 @@ impl Db {
             map,
             cur_bytes,
             cur_evict_idx,
+            cur_level: Arc::new(AtomicU32::new(1)),
+
         }
     }
     pub fn with_capacity(&self, max_capacity: u64) {
@@ -256,6 +275,10 @@ impl Db {
 
     pub fn mem_size(&self) -> u64 {
         self.cur_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn max_mem_size(&self) -> u64 {
+        self.max_bytes.load(Ordering::Relaxed)
     }
 
     pub fn size(&self) -> u64 {
@@ -297,7 +320,7 @@ impl Db {
             }
         }
 
-        debug!("插入->{}", k);
+        debug!("插入->{},need_size->{}", k, need_size);
 
         let insert = self.map.insert(k, entry);
         match insert {
@@ -313,6 +336,8 @@ impl Db {
                 self.cur_bytes.fetch_add(need_size, Ordering::Relaxed);
             }
         }
+
+        debug!("插入size->{} k,cur_mem->{} k", need_size / 1024, self.cur_bytes.load(Ordering::Relaxed) / 1024);
 
         true
     }
@@ -353,13 +378,27 @@ impl Db {
         };
     }
 
+    pub fn mem_level(&self) -> String {
+        let l = self.cur_level.load(Ordering::Relaxed);
+        return match l {
+            1=>"低容量".to_string(),
+            2=>"中容量".to_string(),
+            3=>"高容量".to_string(),
+            _ => "低容量".to_string(),
+        }
+    }
+
     /// 是否处于低容量水位
     pub fn is_low_level_capacity(&self) -> bool {
         let size_low = (self.max_capacity.load(Ordering::Relaxed) as f64 * LOW_LEVEL_FACTORY) as u64;
         let bytes_low = (self.max_bytes.load(Ordering::Relaxed) as f64 * LOW_LEVEL_FACTORY) as u64;
         let cur_size = self.map.size();
-        let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
+        let cur_bytes = self.mem_size();
         if cur_size < size_low && cur_bytes < bytes_low {
+            let max_bytes = self.max_bytes.load(Ordering::Relaxed) / 1024;
+            debug!("max_bytes:{} k * {} = {} k", max_bytes, LOW_LEVEL_FACTORY, bytes_low / 1024);
+            debug!("当前还是低负载，cur_size:{}，cur_mem:{}k,bytes_low:{}k", cur_size, cur_bytes / 1024, bytes_low / 1024);
+            self.cur_level.store(1, Ordering::Relaxed);
             return true;
         }
         false
@@ -372,6 +411,7 @@ impl Db {
         let cur_size = self.map.size();
         let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
         if cur_size >= size_low || cur_bytes >= bytes_low {
+            self.cur_level.store(3, Ordering::Relaxed);
             return true;
         }
         false
@@ -396,7 +436,7 @@ impl Db {
         // map.size > max_size * 0.75
         // cur_bytes > max_bytes * 0.75
         if self.is_high_level_capacity() {
-            trace!("is_high_level_capacity");
+            info!("高负载");
             let start = Instant::now();
             loop {
                 let (evict_num, evict_bytes) = self.do_evict_with_sample_lru_from_idx(self.cur_evict_idx.clone(),
@@ -417,25 +457,34 @@ impl Db {
             return (release_keys, release_bytes);
         }
         debug!("中等容量负载");
+        self.cur_level.store(2, Ordering::Relaxed);
+
         //cur_size <  max_size * 0.75 && cur_bytes <  max_bytes * 0.75
         // simple evict
         let start = Instant::now();
+        let start_idx = self.get_cur_evict_idx();
         loop {
             let (evict_num, evict_bytes) = self.do_evict_expire_data_on_idx(None);
             release_keys = release_keys + evict_num;
             release_bytes = release_bytes + evict_bytes;
             if Instant::now().duration_since(start).gt(&one_millis) {
-                debug!("pre_evict_idx--->{}", self.cur_evict_idx.load(Ordering::Relaxed));
+                trace!("pre_evict_idx--->{}", self.cur_evict_idx.load(Ordering::Relaxed));
                 break;
             }
             if self.is_low_level_capacity() {
                 break;
             }
         }
+        let end_idx = self.get_cur_evict_idx();
         return (release_keys, release_bytes);
     }
 
     pub fn get_cur_evict_idx(&self) -> u64 {
+        let evict_idx = self.cur_evict_idx.load(Ordering::Relaxed);
+        evict_idx
+    }
+
+    pub fn get_add_cur_evict_idx(&self) -> u64 {
         let evict_idx = self.cur_evict_idx.fetch_add(1, Ordering::Relaxed);
         let capacity = self.map.capacity();
 
@@ -451,15 +500,15 @@ impl Db {
     pub fn do_evict_expire_data_on_idx(&self, evict_idx_op: Option<u64>) -> (u64, u64) {
         let mut evict_idx = 0;
 
-        if evict_idx_op.is_none() {
-            evict_idx = self.cur_evict_idx.fetch_add(1, Ordering::Relaxed);
-        } else {
-            evict_idx = evict_idx_op.unwrap();
-        }
+        // if evict_idx_op.is_none() {
+        //     evict_idx = self.cur_evict_idx.fetch_add(1, Ordering::Relaxed);
+        // } else {
+        //     evict_idx = evict_idx_op.unwrap();
+        // }
 
         match evict_idx_op {
             None => {
-                evict_idx = self.get_cur_evict_idx();
+                evict_idx = self.get_add_cur_evict_idx();
             }
             Some(idx) => evict_idx = idx
         }
@@ -642,7 +691,7 @@ impl Db {
         let end_time = Instant::now();
         let diff = end_time.duration_since(start_time).as_micros();
         if diff > 300 {
-            info!("{}微妙loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
+            info!("{}微秒loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
                   diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
         }
 
@@ -996,6 +1045,27 @@ fn test_container_expire_task() {
     std::thread::sleep(Duration::from_secs(10));
 }
 
+
+#[test]
+fn test_evict_task() {
+    setup_logger();
+    let container = Container::new();
+    container.add_db("DB_NAME".to_owned(), 1024 * 1024 * 10);
+
+    let db = container.get_db("DB_NAME").unwrap();
+    println!("start---insert--->");
+    for x in 0..5 {
+        let mut data = [0u8; 1024 * 1024];
+
+        let vec = Vec::from(data.as_ref());
+        db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(5000), MemState::Normal);
+    }
+
+
+    // db.insert("test---1".to_owned(), Bytes::from("dsadsa"), Some(1000), MemState::Normal);
+    std::thread::sleep(Duration::from_secs(40));
+}
+
 #[test]
 fn test_instant_add() {
     let ttl = u64::max_value();
@@ -1078,7 +1148,7 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
                 message
             ))
         })
-        .level(log::LevelFilter::Warn)
+        .level(log::LevelFilter::Info)
         .chain(std::io::stdout())
         // .chain(fern::log_file("output.log")?)
         .apply()?;

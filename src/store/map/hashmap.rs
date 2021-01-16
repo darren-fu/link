@@ -193,9 +193,9 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
                     return Err("Moved".to_owned());
                 }
             }
-            debug!("检索数据idx:{}", idx);
+            trace!("检索数据idx:{}", idx);
         } else {
-            debug!("没有数据on idx:{}", idx);
+            trace!("没有数据on idx:{}", idx);
         }
         Ok(())
     }
@@ -581,14 +581,14 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
         if removed.is_some() {
             self.size.fetch_sub(1, Ordering::Relaxed);
         }
-        debug!("remove完成:,k->{:?},size-->{}", key, self.size.load(Ordering::Relaxed));
+        info!("删除key完成:,k->{:?},size-->{}", key, self.size.load(Ordering::Relaxed));
 
         removed
     }
     fn do_remove(&self, hash_code: u64, key: &K, count: u32) -> Option<Node<K, V>> {
         let target_tb = self.get_table_to_exec();
         let move_node = self.do_remove_on_table(hash_code, key, target_tb, count);
-        info!("删除key->{:?}", key);
+        trace!("删除key->{:?}", key);
         move_node
     }
 
@@ -620,18 +620,18 @@ impl<K: Eq + Hash + Debug + Send + Clone, V: Debug + Send + Clone> ConcurrentHas
             table = "next_table";
         }
 
-        info!("准备删除 key:{:?},capacity->{},index->{},count-->{},table-->{}, status--->{:?}", key, capacity, index, count, table, self.status);
+        trace!("准备删除 key:{:?},capacity->{},index->{},count-->{},table-->{}, status--->{:?}", key, capacity, index, count, table, self.status);
 
 
         let mut node_entry_lock = lk.write();
 
         let mut entry = &mut *node_entry_lock;
-        info!("获取写锁 key:{:?}", key);
+        trace!("获取写锁 key:{:?}", key);
 
         return match entry {
             BinNode(bin) => {
                 let find = entry.remove_key(hash_code, &key);
-                debug!("找到:{:?}", find);
+                // debug!("找到:{:?}", find.);
                 drop(node_entry_lock);
                 find
             }
