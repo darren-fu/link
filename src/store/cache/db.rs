@@ -189,11 +189,13 @@ pub fn do_auto_evict(db_vec: Arc<FastRwLock<HashMap<String, Db>>>) {
 
     for (name, db) in r_db.iter() {
         let start_idx = db.get_cur_evict_idx();
+        let mem_level_before = db.mem_level();
+
         let (evict_num, evict_bytes) = db.do_evict_data();
         let end_idx = db.get_cur_evict_idx();
-        let mem_level = db.mem_level();
-        info!("本次清除{}数据:{}个,check_idx:[from: {} - to: {}], mem_level:{},clear内存大小:{}k,cur_mem:{} k", name,
-              evict_num, start_idx, end_idx, mem_level, evict_bytes / 1024, db.mem_size() / 1024);
+        let mem_level_after = db.mem_level();
+        info!("本次清除{}数据:{}个,check_idx:[from: {} - to: {}], mem_level:[{} -> {}],clear内存大小:{}k,cur_mem:{} k", name,
+              evict_num, start_idx, end_idx, mem_level_before, mem_level_after, evict_bytes / 1024, db.mem_size() / 1024);
     }
 }
 
@@ -379,13 +381,19 @@ impl Db {
     }
 
     pub fn mem_level(&self) -> String {
-        let l = self.cur_level.load(Ordering::Relaxed);
-        return match l {
-            1=>"低容量".to_string(),
-            2=>"中容量".to_string(),
-            3=>"高容量".to_string(),
-            _ => "低容量".to_string(),
+        let mut l = 2;
+        if self.is_low_level_capacity() {
+            l = 1;
         }
+        if self.is_high_level_capacity() {
+            l = 3;
+        }
+        return match l {
+            1 => "低容量".to_string(),
+            2 => "中容量".to_string(),
+            3 => "高容量".to_string(),
+            _ => "低容量".to_string(),
+        };
     }
 
     /// 是否处于低容量水位
