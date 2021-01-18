@@ -148,8 +148,6 @@ impl Container {
             let origin_mem_size = db.origin_max_bytes.load(Ordering::Relaxed);
             info!("DB:{},cur_mem_size:{} k,原始设置的size:{} k,max_mem_size:{} k",
                   db_name, db.mem_size(), origin_mem_size / 1024, db.max_mem_size() / 1024)
-
-
         }
 
         db_len - 1
@@ -339,7 +337,7 @@ impl Db {
             }
         }
 
-        debug!("插入size->{} k,cur_mem->{} k", need_size / 1024, self.cur_bytes.load(Ordering::Relaxed) / 1024);
+        info!("插入size->{} k,cur_mem->{} k", need_size / 1024, self.cur_bytes.load(Ordering::Relaxed) / 1024);
 
         true
     }
@@ -425,6 +423,15 @@ impl Db {
         false
     }
 
+    pub fn over_high_level_bytes(&self) -> u64 {
+        let bytes_low = (self.max_bytes.load(Ordering::Relaxed) as f64 * HIGH_LEVEL_FACTORY) as u64;
+        let cur_bytes = self.cur_bytes.load(Ordering::Relaxed);
+        if cur_bytes > bytes_low {
+            return cur_bytes - bytes_low;
+        }
+        0
+    }
+
 
     pub fn do_evict_data(&self) -> (u64, u64) {
         // map.size < max_size * 0.4
@@ -448,7 +455,7 @@ impl Db {
             let start = Instant::now();
             loop {
                 let (evict_num, evict_bytes) = self.do_evict_with_sample_lru_from_idx(self.cur_evict_idx.clone(),
-                                                                                      DEFAULT_LRU_SAMPLES, 0,
+                                                                                      DEFAULT_LRU_SAMPLES, self.over_high_level_bytes(),
                                                                                       lru_default_dead_line(),
                                                                                       true);
                 release_keys = release_keys + evict_num;
@@ -476,7 +483,7 @@ impl Db {
             release_keys = release_keys + evict_num;
             release_bytes = release_bytes + evict_bytes;
             if Instant::now().duration_since(start).gt(&one_millis) {
-                trace!("pre_evict_idx--->{}", self.cur_evict_idx.load(Ordering::Relaxed));
+                info!("pre_evict_idx--->{}", self.cur_evict_idx.load(Ordering::Relaxed));
                 break;
             }
             if self.is_low_level_capacity() {
@@ -507,12 +514,6 @@ impl Db {
     /// 返回清除的个数和bytes
     pub fn do_evict_expire_data_on_idx(&self, evict_idx_op: Option<u64>) -> (u64, u64) {
         let mut evict_idx = 0;
-
-        // if evict_idx_op.is_none() {
-        //     evict_idx = self.cur_evict_idx.fetch_add(1, Ordering::Relaxed);
-        // } else {
-        //     evict_idx = evict_idx_op.unwrap();
-        // }
 
         match evict_idx_op {
             None => {
@@ -579,18 +580,39 @@ impl Db {
 
         let mut evict_idx = start_idx.load(Ordering::Relaxed);
         let mut hard_vec: Vec<String> = Vec::new();
+        trace!("开始---{},{}", evict_idx, self.map.capacity());
+        let mut oldest_access_key: Option<String> = None;
 
         loop {
-            let mut oldest_access_key: Option<String> = None;
             let mut vec: Vec<String> = Vec::new();
             // evict_idx = start_idx.load(Ordering::Relaxed);
 
             if evict_idx > self.map.capacity() {
                 // start_idx.store(0, Ordering::Relaxed);
+                debug!("到头了---{},{}", evict_idx, self.map.capacity());
+
                 evict_idx = 0;
             }
             //已经找了一圈了，停止
             if checked_num > self.map.capacity() {
+                debug!("一圈了");
+
+                if oldest_access_key.is_some() {
+                    let k = oldest_access_key.unwrap();
+                    info!("查找一圈,找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
+                          &k, checked_num, need_release_bytes, released_bytes, evict_idx);
+
+                    if let Some(moved_node) = self.map.remove(&k) {
+                        if moved_node.get_val_ref().is_some() {
+                            released_bytes = released_bytes + size_of_entry_key(moved_node.get_val_ref().unwrap(), &k);
+                        } else {
+                            released_bytes = released_bytes + k.len() as u64 + 64;
+                        }
+                        drop(moved_node);
+                        evict_num = evict_num + 1;
+                    }
+                }
+
                 break;
             }
             // warn!("开始查找evict_idx,->{}, mapsize->{}", evict_idx, self.map.size());
@@ -598,13 +620,18 @@ impl Db {
             self.map.append_entry_keys(evict_idx, |k_ref, v_ref| {
                 match v_ref {
                     Some(v) => {
+                        trace!("检索evict_idx:{},k-->{}, 上次访问距今MS:{},last_access_at->{:?},比较MS:{},oldest_access_time->{:?},diff:{:?},less:{}", evict_idx, k_ref,
+                               v.last_access_at.load().elapsed().as_millis(),
+                               v.last_access_at.load(),
+                               oldest_access_time.elapsed().as_millis(),
+                               oldest_access_time,
+                               v.last_access_at.load().sub(oldest_access_time),
+                               v.last_access_at.load().le(&oldest_access_time));
+
                         if v.is_expire() {
                             return true;
                         }
-                        debug!("检索k-->{}, last_access_at->{:?},oldest_access_time->{:?}", k_ref, v.last_access_at.load(), oldest_access_time);
-                        checked_num = checked_num + 1;
-                        checked_num_steps = checked_num_steps + 1;
-
+                        // checked_num_steps = checked_num_steps + 1;
                         let last_access = v.last_access_at.load();
 
                         if use_lru {
@@ -612,6 +639,7 @@ impl Db {
                                 oldest_access_time = last_access;
                                 oldest_access_key = Some(k_ref.to_owned());
                                 debug!("不常用的key -> {:?}, {:?}", oldest_access_key, oldest_access_time);
+                                checked_num_steps = checked_num_steps + 1
                             }
                         } else {
                             if last_access.le(&dead_line_access_time) {
@@ -642,6 +670,7 @@ impl Db {
                 }
             }
             if released_bytes >= need_release_bytes {
+                debug!("释放了:{} >= {}", released_bytes, need_release_bytes);
                 break;
             }
 
@@ -663,8 +692,11 @@ impl Db {
                 }
             }
             if released_bytes >= need_release_bytes {
+                debug!("释放了:{} >= {}", released_bytes, need_release_bytes);
                 break;
             }
+
+
             if oldest_access_key.is_some() && checked_num_steps >= samples {
                 let k = oldest_access_key.unwrap();
                 info!("找到可删除->{},checked_num->{},need_release_bytes->{},released_bytes->{},evict_idx->{:?}",
@@ -679,15 +711,17 @@ impl Db {
                     drop(moved_node);
                     evict_num = evict_num + 1;
                 }
-            }
-            if released_bytes >= need_release_bytes {
-                break;
-            }
-            if checked_num_steps >= samples {
+                oldest_access_key = None;
                 checked_num_steps = 0;
                 //重置对比的时间戳，避免使用了前面咋找到的key对应的时间戳，导致后期无法找到可删除的数据
                 oldest_access_time = dead_line_access_time;
             }
+            if released_bytes >= need_release_bytes {
+                break;
+            }
+
+            checked_num = checked_num + 1;
+
             evict_idx = evict_idx + 1;
             loop_count = loop_count + 1;
         }
@@ -699,8 +733,8 @@ impl Db {
         let end_time = Instant::now();
         let diff = end_time.duration_since(start_time).as_micros();
         if diff > 300 {
-            info!("{}微秒loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
-                  diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
+            debug!("{}微秒loop_count:{},evict_idx:{}, start_idx:{},checked_num:{},evict_num:{},released_bytes:{},need_release_bytes:{},self.map.capacity():{},r_remove:{},n_remove:{}",
+                   diff, loop_count, evict_idx, start_idx.load(Ordering::Relaxed), checked_num, evict_num, released_bytes, need_release_bytes, self.map.capacity(), r_remove, n_remove)
         }
 
         (evict_num, released_bytes)
@@ -1062,11 +1096,12 @@ fn test_evict_task() {
 
     let db = container.get_db("DB_NAME").unwrap();
     println!("start---insert--->");
-    for x in 0..5 {
+    for x in 0..10 {
         let mut data = [0u8; 1024 * 1024];
 
         let vec = Vec::from(data.as_ref());
-        db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(5000), MemState::Normal);
+        db.insert(x.to_string() + "aaa", Bytes::from(vec), Some(20_000), MemState::Normal);
+        std::thread::sleep(Duration::from_millis(10))
     }
 
 
@@ -1161,6 +1196,25 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
         // .chain(fern::log_file("output.log")?)
         .apply()?;
     Ok(())
+}
+
+#[test]
+fn test_instant() {
+    let now = Instant::now();
+    let one_sec = Duration::from_millis(1000);
+    let now2 = Instant::now();
+
+    let after_one_sec = now2.checked_add(one_sec).unwrap();
+
+    let is_less = now.le(&after_one_sec);
+
+    let fiv_sec_before = Instant::now().checked_sub(Duration::from_secs(15)).unwrap();
+
+
+    let is_less2 = now.le(&fiv_sec_before);
+
+    print!("is_less:{}", is_less);
+    print!("is_less2:{}", is_less2);
 }
 
 #[derive(Debug)]
